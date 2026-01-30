@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+xgboost
+scikit-learn
+pyupbit
+pybithumb
+python-dotenv
+ta
+matplotlib
+plotly
+watchdog
