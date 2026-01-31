@@ -76,6 +76,11 @@ class TradingBot:
         self.retrain_threshold = int(os.getenv("RETRAIN_THRESHOLD", 10))
         self.confidence_threshold = float(os.getenv("MODEL_CONFIDENCE_THRESHOLD", 0.7))
         
+        # 🆕 Trailing Stop Loss Configuration
+        self.trailing_stop_enabled = True
+        self.trailing_activation = 0.015  # 1.5% 수익 시 트레일링 활성화
+        self.trailing_distance = 0.01      # peak 대비 -1% 하락 시 매도
+        
         # Risk Management
         self.max_position_size = float(os.getenv("MAX_POSITION_SIZE", 0.3))
         
@@ -102,14 +107,21 @@ class TradingBot:
         
         # 🔥 매도 후 재매수 방지 (쿨다운)
         self.sold_coins_cooldown = {}  # {ticker: exit_price}
+        self.failed_buy_cooldown = {}  # {ticker: timestamp} -> 매수 실패 시 쿨다운
         
         # 🔄 Auto Recommendation Timer (5분마다 자동 업데이트 + 1위 종목 추가)
         self.auto_recommendation_enabled = True
-        self.auto_recommendation_interval = 60  # 3분 (180초)
+        self.auto_recommendation_interval = 30  # 30초 (더 빠른 업데이트)
         self.auto_timer_thread = None
         
         # 🔄 봇 초기화 시 포지션 자동 복구 (START 버튼 전에도 보유 코인 감지)
         self._recover_positions()
+        
+        # 🛑 Max Drawdown Limit
+        self.max_drawdown = 0.05  # -5% 손실 시 중단
+        self.initial_balance = None
+        self.peak_balance = None
+        self.last_mdd_check = 0  # 타임스탬프
         
         logger.info("=" * 60)
         logger.info("🚀 Trading Bot Initialized")
@@ -128,6 +140,19 @@ class TradingBot:
             return
         
         self.is_running = True
+        
+        # 🛡️ MDD 초기화
+        try:
+            balance_info = self.exchange.get_balance(ticker="KRW")
+            current_balance = balance_info.get('krw_balance', 0) if isinstance(balance_info, dict) else 0
+            self.initial_balance = current_balance
+            self.peak_balance = current_balance
+            logger.info(f"💰 Initial Balance for MDD: {current_balance:,.0f} KRW (Limit: -{self.max_drawdown*100}%)")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to init MDD balance: {e}")
+            self.initial_balance = 0
+            self.peak_balance = 0
+
         self.thread = threading.Thread(target=self._trading_loop, daemon=True)
         self.thread.start()
         
@@ -150,6 +175,74 @@ class TradingBot:
             self.thread.join(timeout=5)
         logger.info("🛑 Bot STOPPED")
     
+    def _check_drawdown_limit(self):
+        """
+        🛑 Max Drawdown (MDD) 체크
+        - 전체 자산(현금 + 보유코인) 기준
+        - Peak 대비 5% 이상 하락 시 봇 중지
+        """
+        try:
+            # 1. API 호출 제한 (1분마다 체크)
+            if time.time() - self.last_mdd_check < 60:
+                return False
+            self.last_mdd_check = time.time()
+            
+            # 2. 전체 자산 계산
+            # KRW 잔고
+            krw_info = self.exchange.get_balance("KRW") # 아무 티커나 줘도 KRW 잔고 나옴
+            cash = krw_info.get('krw_balance', 0)
+            
+            # 보유 코인 가치
+            holdings = self.exchange.get_holdings()
+            coin_value = 0
+            
+            for h in holdings:
+                ticker = h['ticker']
+                amount = h['amount']
+                # 현재가 조회 (없으면 평단가 사용)
+                cp = self.exchange.get_current_price(ticker)
+                if not cp:
+                    cp = h.get('avg_buy_price', 0)
+                
+                coin_value += amount * cp
+            
+            total_equity = cash + coin_value
+            
+            # 3. Peak 업데이트
+            if self.peak_balance is None or total_equity > self.peak_balance:
+                self.peak_balance = total_equity
+                # logger.debug(f"💰 New Peak Balance: {total_equity:,.0f} KRW")
+            
+            # 4. MDD 계산
+            if self.peak_balance > 0:
+                drawdown = (self.peak_balance - total_equity) / self.peak_balance
+            else:
+                drawdown = 0
+            
+            # logger.debug(f"📉 Check MDD: {drawdown:.2%} (Limit: {self.max_drawdown:.0%})")
+            
+            # 5. 한도 초과 시 비상 정지
+            if drawdown >= self.max_drawdown:
+                logger.error("=" * 60)
+                logger.error(f"🛑 MAX DRAWDOWN LIMIT REACHED: -{drawdown*100:.2f}%")
+                logger.error(f"   Peak: {self.peak_balance:,.0f} KRW")
+                logger.error(f"   Current: {total_equity:,.0f} KRW")
+                logger.error("🛑 STOPPING BOT & SELLING ALL POSITIONS")
+                logger.error("=" * 60)
+                
+                # 모든 포지션 시장가 청산
+                for ticker in list(self.positions.keys()):
+                    logger.warning(f"🚨 MDD Emergency Sell: {ticker}")
+                    self._execute_sell(ticker, 0, "MDD Triggered")
+                
+                self.stop()
+                return True
+                
+        except Exception as e:
+            logger.error(f"⚠️ MDD check failed: {e}")
+        
+        return False
+
     def _trading_loop(self):
         """
         메인 트레이딩 루프
@@ -166,7 +259,11 @@ class TradingBot:
         
         while self.is_running:
             try:
-                # 0. 🔄 포지션 동기화 (수동 매도 감지)
+                # 🛑 MDD 체크 (비상 정지)
+                if self._check_drawdown_limit():
+                    break
+                
+                # 1. 포지션 조회 (업비트 실시간 싱크)
                 self._sync_positions_with_exchange()
                 
                 # 1. 포지션 체크 (모든 보유 포지션)
@@ -174,10 +271,17 @@ class TradingBot:
                     self._check_exit_conditions(ticker)
                 
                 # 2. 진입 체크 (모든 선택된 티커)
-                for ticker in self.tickers:
-                    # 이미 포지션이 있는 코인은 건너뜀
-                    if ticker not in self.positions:
-                        self._check_entry_conditions(ticker)
+                # 🛡️ 잔액 사전 체크: 잔액 부족 시 전체 매수 스킵
+                balance_info = self.get_account_balance()
+                available_krw = balance_info.get('krw_balance', 0)
+                
+                if available_krw < self.trade_amount:
+                    logger.debug(f"💸 Insufficient balance ({available_krw:,.0f} KRW). Skipping all buy checks.")
+                else:
+                    for ticker in self.tickers:
+                        # 이미 포지션이 있는 코인은 건너뜀
+                        if ticker not in self.positions:
+                            self._check_entry_conditions(ticker)
                 
                 # 2. 대기 (10초)
                 time.sleep(10)
@@ -191,10 +295,14 @@ class TradingBot:
     def _recover_positions(self):
         """
         거래소 잔고를 조회하여 누락된 포지션을 복구합니다.
-        (재시작 시 포지션 유지용)
+        (재시작 시 포지션 유지용 - 보유 시간도 유지)
         """
         logger.info("🔄 Syncing positions from exchange...")
         try:
+            # 0. DB에서 열린 포지션 조회 (진입 시간 복구용)
+            db_positions = self.memory.get_open_positions()
+            db_lookup = {p['ticker']: p for p in db_positions}
+            
             # 1. 모든 보유 코인 조회 (Upbit API 사용)
             holdings = self.exchange.get_holdings()
             
@@ -213,15 +321,28 @@ class TradingBot:
                 
                 if entry_price <= 0:
                     continue
-
-                logger.info(f"♻️ Recovered Position: {ticker} (Amt: {amount:.4f}, Avg: {entry_price:,.0f})")
                 
+                # 🔥 DB에서 진입 시간 복구 (없으면 현재 시간)
+                if ticker in db_lookup:
+                    db_entry = db_lookup[ticker]
+                    trade_id = db_entry['id']
+                    entry_time_str = db_entry['entry_time']
+                    try:
+                        entry_time = datetime.fromisoformat(entry_time_str)
+                    except:
+                        entry_time = datetime.now()
+                    logger.info(f"♻️ Recovered Position: {ticker} (Amt: {amount:.4f}, Avg: {entry_price:,.0f}, EntryTime: {entry_time_str})")
+                else:
+                    trade_id = f"recovered_{ticker}_{int(time.time())}"
+                    entry_time = datetime.now()
+                    logger.info(f"♻️ New Position: {ticker} (Amt: {amount:.4f}, Avg: {entry_price:,.0f})")
+
                 self.positions[ticker] = {
                     "ticker": ticker,
-                    "trade_id": f"recovered_{ticker}_{int(time.time())}",
+                    "trade_id": trade_id,
                     "entry_price": entry_price,
                     "amount": amount,
-                    "entry_time": datetime.now() # 진입 시간은 현재로 리셋
+                    "entry_time": entry_time  # 🔥 DB에서 복구된 시간!
                 }
                 
                 # 감시 목록(Tickers)에 자동 추가
@@ -316,9 +437,27 @@ class TradingBot:
         매수 조건 체크 및 진입
         """
         try:
+            # 🚫 매수 실패 쿨다운 체크 (1분)
+            if ticker in self.failed_buy_cooldown:
+                last_fail_time = self.failed_buy_cooldown[ticker]
+                if datetime.now() - last_fail_time < timedelta(minutes=1):
+                    # 쿨다운 중이면 스킵
+                    return
+                else:
+                    # 시간 지났으면 해제 및 재도전 허용
+                    del self.failed_buy_cooldown[ticker]
+                    logger.info(f"🔓 {ticker} buy cooldown released.")
+
             # 1. 현재 데이터 수집
             df = self.exchange.get_ohlcv(ticker)
             if df is None or len(df) < 30:
+                return
+            
+            # 🛡️ 최소 가격 필터 (저가 코인 제외)
+            current_price = self.exchange.get_current_price(ticker)
+            MIN_PRICE = 100  # 100원 미만 코인 제외
+            if current_price and current_price < MIN_PRICE:
+                logger.debug(f"⚠️ [{ticker}] Price too low ({current_price} KRW), skipping")
                 return
             
             # 2. 특징 추출
@@ -330,15 +469,33 @@ class TradingBot:
             features_df = FeatureEngineer.features_to_dataframe(features)
             prediction, confidence = self.learner.predict(features_df)
             
-            # 4. 매수 조건 평가
+            # 4. 매수 조건 평가 (🆕 다양화된 진입 조건)
             rsi = features['rsi']
             bb_position = features['bb_position']
+            rsi_change = features.get('rsi_change', 0)
+            volume_trend = features.get('volume_trend', 0)
             
-            # XGBoost가 상승 예측 AND 확신도 높음
-            ai_signal = (prediction == 1) and (confidence > self.confidence_threshold)
+            # ❄️ Hybrid Mode: AI가 없거나 확신이 없어도, 기술적 지표가 강력하면 매수 (데이터 수집 겸용)
+            # 조건: RSI 30 미만(과매도) AND 반등 시작(Change>0) AND 볼린저 하단
+            is_strong_technical_signal = (rsi < 30) and (rsi_change > 0) and (bb_position < 0.2)
+            
+            if is_strong_technical_signal:
+                logger.info(f"💎 Technical Value Buy: {ticker} (RSI={rsi:.1f}, Change={rsi_change:.1f}) - AI Override")
+                self._execute_buy(ticker, features, 0.5)  # 확신도 0.5(중립)로 진입
+                return
+            
+            # 🔧 확신도 기반 시그널 (클래스 수에 상관없이 작동)
+            # confidence는 "좋은 수익" 확률 (class 2 또는 class 1)
+            ai_profit_signal = confidence > self.confidence_threshold
             
             # Mean Reversion 시그널 (과매도 또는 볼린저 하단)
             oversold = (rsi < 30) or (bb_position < 0.2)
+            
+            # 🆕 모멘텀 시그널: RSI가 상승 중 (과매도 회복 패턴)
+            momentum_signal = (rsi < 40) and (rsi_change > 2)  # RSI 35 이하에서 상승 중
+            
+            # 🆕 거래량 시그널: 거래량 증가 중
+            volume_signal = volume_trend > 0.2  # 거래량 20% 증가
             
             # 🛡️ 중복 매수 방지: 이미 포지션이 있으면 스킵
             if ticker in self.positions:
@@ -376,10 +533,10 @@ class TradingBot:
                         drop_pct = (last_exit_price - current_price) / last_exit_price * 100
                         logger.info(
                             f"✅ [{ticker}] Profit cooldown released! "
-                            f"Price dropped {drop_pct:.1f}%: {current_price:,.0f} < {rebuy_price_threshold:,.0f}"
+                            f"Price dropped {drop_pct:.1f}%"
                         )
                 
-                # 손절 케이스: 가격 상승 시 재매수
+                # 손절 케이스: 가격 회복 시 재매수
                 else:
                     rebuy_price_threshold = last_exit_price * (1 + self.rebuy_threshold)
                     
@@ -393,7 +550,7 @@ class TradingBot:
                         rise_pct = (current_price - last_exit_price) / last_exit_price * 100
                         logger.info(
                             f"✅ [{ticker}] Loss cooldown released! "
-                            f"Price recovered {rise_pct:.1f}%: {current_price:,.0f} > {rebuy_price_threshold:,.0f}"
+                            f"Price recovered {rise_pct:.1f}%"
                         )
                 
                 # 쿨다운 해제
@@ -402,7 +559,19 @@ class TradingBot:
                 if ticker not in self.tickers:
                     self.tickers.append(ticker)
             
-            if ai_signal and oversold:
+            # 🆕 다양화된 매수 조건 (3가지 시나리오)
+            # 시나리오 1: AI가 좋은 수익 예측 + 과매도
+            condition_1 = ai_profit_signal and oversold
+            
+            # 시나리오 2: AI 매우 높은 확신도(90%+) → 과매도 조건 완화
+            condition_2 = confidence > 0.90
+            
+            # 시나리오 3: 과매도 회복 패턴 (RSI 상승 + 거래량 증가)
+            condition_3 = oversold and momentum_signal and volume_signal and (confidence > 0.7)
+            
+            if condition_1 or condition_2 or condition_3:
+                reason = "AI+Oversold" if condition_1 else ("High Confidence" if condition_2 else "Momentum Recovery")
+                logger.info(f"✅ [{ticker}] Entry Signal: {reason} (Conf={confidence:.1%}, RSI={rsi:.1f})")
                 self._execute_buy(ticker, features, confidence)
             else:
                 logger.debug(
@@ -414,15 +583,73 @@ class TradingBot:
         except Exception as e:
             logger.error(f"❌ Entry check failed: {e}")
     
+    def calculate_position_size(self, ticker: str, confidence: float) -> float:
+        """
+        🔥 Dynamic Position Sizing (Kelly Criterion)
+        확신도와 승률에 따라 투자 금액 동적 조절
+        """
+        try:
+            # 1. 통계 데이터 조회
+            stats = self.memory.get_statistics()
+            win_rate = stats.get('win_rate', 0.0)
+            avg_win = stats.get('avg_profit', 0.01)  # 기본 1%
+            avg_loss = abs(stats.get('avg_loss', -0.01))
+            
+            # 통계 신뢰도 부족 시 (데이터 30개 미만) -> 고정 금액
+            if stats.get('total_trades', 0) < 30:
+                return float(self.trade_amount)
+            
+            # 2. Kelly Criterion 계산
+            # f* = (p * b - q) / b
+            # p = win_rate, b = avg_win / avg_loss, q = 1 - p
+            if avg_loss > 0:
+                b = avg_win / avg_loss
+                kelly_fraction = (win_rate * b - (1 - win_rate)) / b
+            else:
+                kelly_fraction = 0
+            
+            # 3. Half-Kelly (안전 모드) 및 제한
+            # 이론값의 50%만 적용, 최대 25% 제한
+            kelly_fraction = max(0, min(kelly_fraction * 0.5, 0.25))
+            
+            # 4. 잔액 조회
+            balance = self.exchange.get_balance(ticker="KRW")
+            if isinstance(balance, dict):
+                 krw_balance = balance.get('krw_balance', 0)
+            else:
+                 krw_balance = 0
+            
+            # 5. 최종 금액 계산 (Kelly * Confidence)
+            optimal_amount = krw_balance * kelly_fraction * confidence
+            
+            # 6. 최소/최대 한도 적용
+            min_amount = 5002  # 업비트 최소 주문 5000원 + 여유
+            max_amount = krw_balance * 0.3  # 최대 잔액의 30%까지만
+            
+            final_amount = max(min_amount, min(optimal_amount, max_amount))
+            
+            logger.info(
+                f"💰 Position Sizing: {final_amount:,.0f} KRW "
+                f"(Kelly={kelly_fraction:.1%}, Conf={confidence:.1%}, Bal={krw_balance:,.0f})"
+            )
+            return final_amount
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Position sizing failed: {e}. Using default.")
+            return float(self.trade_amount)
+
     def _execute_buy(self, ticker: str, features: Dict, confidence: float):
         """
         매수 주문 실행
         """
         try:
+            # 💰 Dynamic Position Sizing 적용
+            trade_money = self.calculate_position_size(ticker, confidence)
+            
             # 🛡️ 최소 주문 금액 검증 (5,000원)
-            if self.trade_amount < 5000:
+            if trade_money < 5000:
                 logger.warning(
-                    f"⚠️ Cannot buy {ticker}: Trade amount ({self.trade_amount:,.0f} KRW) "
+                    f"⚠️ Cannot buy {ticker}: Trade amount ({trade_money:,.0f} KRW) "
                     f"is below minimum (5,000 KRW)."
                 )
                 logger.info("💡 Tip: Increase 'Trade Amount' to at least 5,000 KRW in sidebar.")
@@ -435,14 +662,17 @@ class TradingBot:
                 return
             
             # 2. 매수 수량 계산
-            buy_amount = self.trade_amount / current_price
+            buy_amount = trade_money / current_price
             
             # 3. 주문 실행 (Market Order)
-            logger.info(f"🚀 Executing REAL Buy Order for {ticker}...")
-            order = self.exchange.buy_market_order(ticker, self.trade_amount, buy_amount)
+            logger.info(f"🚀 Executing REAL Buy Order for {ticker} (Amt: {trade_money:,.0f} KRW)...")
+            order = self.exchange.buy_market_order(ticker, trade_money, buy_amount)
             
             if not order:
                 logger.error("❌ Order Failed")
+                # 실패 쿨다운 등록 (1분)
+                self.failed_buy_cooldown[ticker] = datetime.now()
+                logger.warning(f"⏳ {ticker} added to failed buy cooldown for 1 minute.")
                 return
             
             # 데모 모드 (실제 주문 없이 시뮬레이션)
@@ -498,12 +728,24 @@ class TradingBot:
                 f"Profit:{profit_rate*100:.2f}% (Target:>{self.target_profit*100:.1f}%)"
             )
             
-            # 2. 현재 데이터 수집
+            # 2. 현재 데이터 수집 (Emergency Check를 위해 미리 로드)
             df = self.exchange.get_ohlcv(ticker)
             should_exit = False
             exit_reason = ""
             
-            # 조건 1: 목표 수익률
+            # 🚨 0순위: Emergency Exit (Flash Crash)
+            # 현재 캔들 시가 대비 3% 이상 급락 시 즉시 탈출
+            if df is not None and not df.empty:
+                last_candle = df.iloc[-1]
+                candle_open = last_candle['open']
+                if candle_open > 0:
+                    candle_drop = (current_price - candle_open) / candle_open
+                    if candle_drop < -0.03:  # -3% 급락
+                        logger.warning(f"🚨 [{ticker}] Emergency Exit Triggered! Drop {candle_drop*100:.1f}%")
+                        self._execute_sell(ticker, current_price, f"🚨 FLASH CRASH (Drop {candle_drop*100:.1f}%)")
+                        return
+
+            # 조건 1: 목표 수익률 (Emergency가 아닐 때만 체크)
             if profit_rate >= self.target_profit:
                 should_exit = True
                 exit_reason = f"Target Profit ({self.target_profit*100}%)"
@@ -512,6 +754,25 @@ class TradingBot:
             elif profit_rate <= -self.stop_loss:
                 should_exit = True
                 exit_reason = f"Stop Loss ({-self.stop_loss*100}%)"
+            
+            # 🆕 조건 2.5: Trailing Stop Loss
+            elif self.trailing_stop_enabled and profit_rate >= self.trailing_activation:
+                # Peak 가격 추적
+                if 'peak_price' not in position:
+                    position['peak_price'] = entry_price
+                
+                if current_price > position['peak_price']:
+                    position['peak_price'] = current_price
+                    logger.debug(f"🔼 [{ticker}] New Peak: {current_price:,.0f} (+{profit_rate*100:.2f}%)")
+                
+                # Peak 대비 하락률 체크
+                trailing_stop_price = position['peak_price'] * (1 - self.trailing_distance)
+                
+                if current_price < trailing_stop_price:
+                    peak_profit = (position['peak_price'] - entry_price) / entry_price
+                    should_exit = True
+                    exit_reason = f"Trailing Stop (Peak={position['peak_price']:,.0f}, +{peak_profit*100:.1f}%)"
+                    logger.info(f"🔔 [{ticker}] Trailing Stop Triggered! Peak={position['peak_price']:,.0f}, Current={current_price:,.0f}")
             
             # 조건 3: 볼린저 밴드 상단 (타이밍 매도)
             elif df is not None and len(df) >= 20:
@@ -727,60 +988,57 @@ class TradingBot:
     
     def _auto_recommendation_timer(self):
         """
-        🕐 5분마다 추천 업데이트 + 1위 종목 자동 추가
+        🕐 1분마다 추천 업데이트 + 1위 종목 자동 추가
         """
         logger.info("🔄 Auto recommendation timer loop started")
         
         while self.is_running:
             try:
-                # 5분 대기
-                time.sleep(self.auto_recommendation_interval)
-                
-                if not self.is_running:
-                    break
-                
                 logger.info("🔄 Auto-updating coin recommendations...")
                 
                 # 추천 업데이트
                 recs = self.coin_selector.get_top_recommendations(top_n=5)
                 self.recommended_coins = recs
                 
-                if not recs:
-                    logger.warning("⚠️ No recommendations available")
-                    continue
+                # 🏆 상위 코인 중 첫 번째 미보유 종목 자동 추가
+                if recs:
+                    added = False
+                    for i, rec in enumerate(recs, 1):
+                        ticker = rec['ticker']
+                        score = rec['score']
+                        conf = rec['confidence']
+                        
+                        # 이미 보유 중이거나 쿨다운 중이면 스킵
+                        if ticker in self.tickers:
+                            logger.debug(f"   {i}위 {ticker}: Already in tickers")
+                            continue
+                        
+                        if ticker in self.positions:
+                            logger.debug(f"   {i}위 {ticker}: Already holding position")
+                            continue
+                        
+                        if ticker in self.sold_coins_cooldown:
+                            logger.debug(f"   {i}위 {ticker}: In cooldown")
+                            continue
+                        
+                        # 첫 번째 사용 가능한 코인 발견!
+                        logger.info(f"🏆 Rank #{i} Recommendation: {ticker} (Score={score:.1f}, Confidence={conf:.1%})")
+                        self.tickers.append(ticker)
+                        logger.info(f"➕ Auto-added coin: {ticker}")
+                        added = True
+                        break
+                    
+                    if not added:
+                        logger.info("📊 All top 5 coins are already owned or in cooldown. No new additions.")
                 
-                # 1위 종목 추출
-                top_coin = recs[0]
-                ticker = top_coin['ticker']
-                score = top_coin['score']
-                confidence = top_coin['confidence']
-                
-                logger.info(f"🏆 Top Recommendation: {ticker} (Score={score:.1f}, Confidence={confidence:.1f}%)")
-                
-                # 중복 체크: 이미 Active Tickers에 있으면 스킵
-                if ticker in self.tickers:
-                    logger.info(f"📊 {ticker} is already in active tickers. Skipping.")
-                    continue
-                
-                # 중복 체크: 이미 포지션 보유 중이면 스킵
-                if ticker in self.positions:
-                    logger.info(f"📊 {ticker} position already exists. Skipping.")
-                    continue
-                
-                # 🛡️ 최소 주문 금액 체크 (5,000원)
-                if self.trade_amount < 5000:
-                    logger.warning(
-                        f"⚠️ Trade amount ({self.trade_amount:,.0f} KRW) is below minimum (5,000 KRW). "
-                        f"Skipping auto-add for {ticker}."
-                    )
-                    continue
-                
-                # 자동 추가
-                self.tickers.append(ticker)
-                logger.info(f"✅ Auto-added {ticker} to active tickers! (Score={score:.1f}, Conf={confidence:.1f}%)")
-                
+                # 대기 (1초 단위로 체크하여 빠른 종료 지원)
+                for _ in range(self.auto_recommendation_interval):
+                    if not self.is_running:
+                        break
+                    time.sleep(1)
             except Exception as e:
                 logger.error(f"❌ Auto recommendation timer error: {e}")
+                time.sleep(60) # 에러 시 1분 대기
                 
         logger.info("🔄 Auto recommendation timer stopped")
     

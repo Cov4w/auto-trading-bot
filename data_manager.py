@@ -65,6 +65,7 @@ class TradeMemory:
                     exit_price REAL,
                     profit_rate REAL,
                     is_profitable INTEGER,  -- 1: 수익, 0: 손실
+                    profit_class INTEGER,   -- 🆕 0: 큰손실, 1: 소폭, 2: 좋은수익
                     
                     -- Technical Features (진입 시점)
                     rsi REAL,
@@ -77,6 +78,18 @@ class TradeMemory:
                     ema_9 REAL,
                     ema_21 REAL,
                     atr REAL,
+                    
+                    -- 🆕 Time Features (시간 특징)
+                    hour_of_day INTEGER,    -- 0-23
+                    day_of_week INTEGER,    -- 0-6 (월-일)
+                    
+                    -- 🆕 Momentum Features (모멘텀 특징)
+                    rsi_change REAL,        -- RSI 변화량 (5분)
+                    volume_trend REAL,      -- 거래량 추세
+                    
+                    -- 🆕 Sequence Features (시계열 특징)
+                    rsi_prev_5m REAL,       -- 5분 전 RSI
+                    bb_position_prev_5m REAL,  -- 5분 전 BB 위치
                     
                     -- Model Prediction
                     model_confidence REAL,
@@ -120,8 +133,10 @@ class TradeMemory:
                     timestamp, ticker, entry_price, model_confidence,
                     rsi, macd, macd_signal, bb_position, volume_ratio,
                     price_change_5m, price_change_15m, ema_9, ema_21, atr,
+                    hour_of_day, day_of_week, rsi_change, volume_trend,
+                    rsi_prev_5m, bb_position_prev_5m,
                     status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
             """, (
                 datetime.now().isoformat(),
                 ticker,
@@ -136,7 +151,13 @@ class TradeMemory:
                 features.get('price_change_15m', 0),
                 features.get('ema_9', 0),
                 features.get('ema_21', 0),
-                features.get('atr', 0)
+                features.get('atr', 0),
+                features.get('hour_of_day', 0),
+                features.get('day_of_week', 0),
+                features.get('rsi_change', 0),
+                features.get('volume_trend', 0),
+                features.get('rsi_prev_5m', 0),
+                features.get('bb_position_prev_5m', 0)
             ))
             conn.commit()
             trade_id = cursor.lastrowid
@@ -171,51 +192,84 @@ class TradeMemory:
                 # 업비트: 0.05% + 0.05% = 0.1%
                 is_profitable = 1 if profit_rate > 0.001 else 0
                 
+                # 🆕 profit_class: 3단계 분류 (수익률 크기 반영)
+                # 0: 큰 손실 (< -0.5%)
+                # 1: 소폭/본전 (-0.5% ~ +0.5%)
+                # 2: 좋은 수익 (> +0.5%)
+                if profit_rate < -0.005:
+                    profit_class = 0  # Big loss
+                elif profit_rate > 0.005:
+                    profit_class = 2  # Good profit
+                else:
+                    profit_class = 1  # Neutral
+                
                 # 업데이트
                 conn.execute("""
                     UPDATE trades 
                     SET exit_price = ?,
                         profit_rate = ?,
                         is_profitable = ?,
+                        profit_class = ?,
                         status = 'closed'
                     WHERE id = ?
-                """, (exit_price, profit_rate, is_profitable, trade_id))
+                """, (exit_price, profit_rate, is_profitable, profit_class, trade_id))
                 conn.commit()
                 
-                emoji = "📈" if is_profitable else "📉"
+                class_emoji = ["🔴", "⚪", "🟢"][profit_class]
                 logger.info(
-                    f"{emoji} Trade Closed: ID={trade_id}, "
-                    f"Profit={profit_rate*100:.2f}%"
+                    f"{class_emoji} Trade Closed: ID={trade_id}, "
+                    f"Profit={profit_rate*100:.2f}% (Class={profit_class})"
                 )
         except Exception as e:
             logger.error(f"❌ Failed to update trade exit: {e}")
     
-    def get_learning_data(self, min_samples: int = 30) -> Optional[Tuple[pd.DataFrame, pd.Series]]:
+    def get_learning_data(self, min_samples: int = 30, limit: int = 125) -> Optional[Tuple[pd.DataFrame, pd.Series]]:
         """
-        모델 학습용 데이터 반환
+        모델 학습용 데이터 반환 (확장 버전 - 16개 특징 + 3단계 라벨)
+        Adaptive Retraining: 최신 데이터 N개만 사용하여 학습
+        
+        Args:
+            min_samples: 최소 데이터 수
+            limit: 최대 데이터 수 (최신 데이터 위주)
         
         Returns:
             (X, y): 특징 데이터프레임과 라벨 시리즈
-                    데이터가 부족하면 None 반환
         """
         with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query("""
+            df = pd.read_sql_query(f"""
                 SELECT 
                     rsi, macd, macd_signal, bb_position, volume_ratio,
                     price_change_5m, price_change_15m, ema_9, ema_21, atr,
-                    is_profitable
+                    COALESCE(hour_of_day, 12) as hour_of_day,
+                    COALESCE(day_of_week, 0) as day_of_week,
+                    COALESCE(rsi_change, 0) as rsi_change,
+                    COALESCE(volume_trend, 0) as volume_trend,
+                    COALESCE(rsi_prev_5m, rsi) as rsi_prev_5m,
+                    COALESCE(bb_position_prev_5m, bb_position) as bb_position_prev_5m,
+                    COALESCE(profit_class, 
+                        CASE 
+                            WHEN profit_rate < -0.005 THEN 0
+                            WHEN profit_rate > 0.005 THEN 2
+                            ELSE 1
+                        END
+                    ) as profit_class
                 FROM trades
                 WHERE status = 'closed' AND is_profitable IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT {limit}
             """, conn)
+            
+            # 최신순(DESC)으로 가져왔으므로 다시 시간순(ASC)으로 정렬
+            df = df.iloc[::-1].reset_index(drop=True)
         
         if len(df) < min_samples:
             logger.warning(f"⚠️ Insufficient data: {len(df)}/{min_samples}")
             return None
         
-        X = df.drop('is_profitable', axis=1)
-        y = df['is_profitable']
+        X = df.drop('profit_class', axis=1)
+        y = df['profit_class']
         
-        logger.info(f"📊 Learning Data Loaded: {len(df)} samples")
+        logger.info(f"📊 Learning Data Loaded: {len(df)} samples (16 features, 3-class label)")
         return X, y
     
     def get_statistics(self) -> Dict:
@@ -242,6 +296,32 @@ class TradeMemory:
             "max_profit_pct": (max_profit or 0) * 100,
             "max_loss_pct": (max_loss or 0) * 100
         }
+    
+    def get_open_positions(self) -> list:
+        """
+        열린 포지션(open) 조회 - 재시작 시 보유 시간 유지용
+        
+        Returns:
+            list: [{"id": trade_id, "ticker": ticker, "entry_price": price, "entry_time": timestamp}, ...]
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("""
+                SELECT id, ticker, entry_price, timestamp
+                FROM trades
+                WHERE status = 'open'
+            """).fetchall()
+        
+        positions = []
+        for row in rows:
+            positions.append({
+                "id": row[0],
+                "ticker": row[1],
+                "entry_price": row[2],
+                "entry_time": row[3]  # ISO format string
+            })
+        
+        logger.info(f"📂 Found {len(positions)} open positions in DB")
+        return positions
 
 
 class ModelLearner:
@@ -258,6 +338,10 @@ class ModelLearner:
     def __init__(self, model_path: str = "models/xgb_model.pkl"):
         self.model_path = model_path
         self.model: Optional[xgb.XGBClassifier] = None
+        self.scaler: Optional[object] = None  # 🆕 StandardScaler 저장
+        self.pca: Optional[object] = None     # 🆕 PCA 객체 저장
+        self.use_pca = True                   # PCA 사용 여부
+        self.pca_components = 0.95            # 95% 분산 보존
         self.metrics = {
             "accuracy": 0.0,
             "last_trained": None,
@@ -279,32 +363,113 @@ class ModelLearner:
         """
         logger.info("🎓 Starting Initial Model Training...")
         
-        # Train-Test Split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+        # 🔥 Outlier Detection (이상값 제거)
+        original_samples = len(X)
+        if original_samples >= 30:  # 충분한 데이터가 있을 때만 적용
+            from sklearn.ensemble import IsolationForest
+            
+            outlier_detector = IsolationForest(
+                contamination=0.1,  # 데이터의 10%를 이상값으로 간주
+                random_state=42,
+                n_jobs=-1
+            )
+            
+            # 이상값 감지 (-1: 이상값, 1: 정상값)
+            is_inlier = outlier_detector.fit_predict(X)
+            
+            # 정상 데이터만 필터링
+            X_clean = X[is_inlier == 1]
+            y_clean = y[is_inlier == 1]
+            
+            outliers_removed = original_samples - len(X_clean)
+            logger.info(f"🧹 Outlier Detection:")
+            logger.info(f"   Total Samples: {original_samples}")
+            logger.info(f"   Outliers Removed: {outliers_removed} ({outliers_removed/original_samples*100:.1f}%)")
+            logger.info(f"   Clean Samples: {len(X_clean)}")
+            
+            X = X_clean
+            y = y_clean
+        else:
+            logger.info(f"⚠️ Skipping outlier detection (need 30+ samples, got {original_samples})")
         
-        # XGBoost Model with M3 Optimization
+        # 🔧 클래스 분포 확인 및 리매핑
+        unique_classes = sorted(y.unique())
+        logger.info(f"📊 Class distribution: {dict(y.value_counts())}")
+        
+        # 클래스가 3개 미만이면 존재하는 클래스만으로 학습
+        num_classes = len(unique_classes)
+        if num_classes < 3:
+            logger.warning(f"⚠️ Only {num_classes} classes present. Remapping to 0-{num_classes-1}")
+            # 클래스 리매핑 (0, 2 → 0, 1)
+            class_map = {c: i for i, c in enumerate(unique_classes)}
+            y = y.map(class_map)
+        
+        # Train-Test Split (클래스가 충분하면 stratify 사용)
+        try:
+            # 각 클래스별 최소 2개 이상 있어야 stratify 가능
+            can_stratify = all(y.value_counts() >= 2)
+            if can_stratify:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42, stratify=y
+                )
+            else:
+                logger.warning("⚠️ Not enough samples per class for stratify. Using random split.")
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ Stratify failed: {e}. Using random split.")
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+        
+        # 🔧 Feature Normalization (StandardScaler)
+        from sklearn.preprocessing import StandardScaler
+        
+        self.scaler = StandardScaler()
+        X_train_scaled = self.scaler.fit_transform(X_train)  # 학습 데이터로 fit + transform
+        X_test_scaled = self.scaler.transform(X_test)        # 테스트 데이터는 transform만
+        
+        
+        logger.info("🔧 Feature Normalization Applied (StandardScaler)")
+        
+        # 🆕 PCA Dimensionality Reduction
+        if self.use_pca:
+            from sklearn.decomposition import PCA
+            self.pca = PCA(n_components=self.pca_components)
+            X_train_final = self.pca.fit_transform(X_train_scaled)
+            X_test_final = self.pca.transform(X_test_scaled)
+            
+            n_features_ = self.pca.n_components_
+            explained_var_ = sum(self.pca.explained_variance_ratio_)
+            logger.info(f"🧬 PCA Applied: {X_train.shape[1]} -> {n_features_} features (Var={explained_var_:.1%})")
+        else:
+            self.pca = None
+            X_train_final = X_train_scaled
+            X_test_final = X_test_scaled
+        
+        # 🆕 XGBoost Multi-Class Model (동적 클래스 수)
         self.model = xgb.XGBClassifier(
             n_estimators=100,
             max_depth=5,
             learning_rate=0.1,
-            objective='binary:logistic',
-            eval_metric='logloss',
+            objective='multi:softprob' if num_classes > 2 else 'binary:logistic',
+            eval_metric='mlogloss' if num_classes > 2 else 'logloss',
+            num_class=num_classes if num_classes > 2 else None,
             n_jobs=-1,  # M3 최적화: 모든 코어 사용
             random_state=42,
             tree_method='hist'  # 빠른 학습
         )
         
-        # 학습 수행
+        # 학습 수행 (정규화된 데이터 사용)
         self.model.fit(
-            X_train, y_train,
-            eval_set=[(X_test, y_test)],
+            X_train_final, y_train,
+            eval_set=[(X_test_final, y_test)],
             verbose=False
         )
         
         # 평가
-        y_pred = self.model.predict(X_test)
+        y_pred = self.model.predict(X_test_final)
         accuracy = accuracy_score(y_test, y_pred)
         
         # 메트릭 업데이트
@@ -337,21 +502,62 @@ class ModelLearner:
     
     def predict(self, features: pd.DataFrame) -> Tuple[int, float]:
         """
-        예측 수행
+        예측 수행 (3-class 분류)
         
         Returns:
             (prediction, confidence): 
-                - prediction: 0 (하락) 또는 1 (상승)
-                - confidence: 확신도 (0.0 ~ 1.0)
+                - prediction: 0 (큰손실), 1 (소폭), 2 (좋은수익)
+                - confidence: "좋은 수익" 확률 (class 2의 확률)
         """
         if self.model is None:
             logger.warning("⚠️ Model not trained yet!")
             return 0, 0.0
         
+        # 🆕 16개 특징 확인 및 누락된 특징 채우기
+        expected_features = [
+            'rsi', 'macd', 'macd_signal', 'bb_position', 'volume_ratio',
+            'price_change_5m', 'price_change_15m', 'ema_9', 'ema_21', 'atr',
+            'hour_of_day', 'day_of_week', 'rsi_change', 'volume_trend',
+            'rsi_prev_5m', 'bb_position_prev_5m'
+        ]
+        
+        # 누락된 특징 기본값 채우기
+        for feat in expected_features:
+            if feat not in features.columns:
+                if feat == 'hour_of_day':
+                    features[feat] = 12  # 정오
+                elif feat == 'day_of_week':
+                    features[feat] = 0   # 월요일
+                elif feat == 'rsi_prev_5m':
+                    features[feat] = features.get('rsi', 50)
+                elif feat == 'bb_position_prev_5m':
+                    features[feat] = features.get('bb_position', 0.5)
+                else:
+                    features[feat] = 0
+        
+        # 특징 순서 맞추기
+        features = features[expected_features]
+        
+        # 🔧 Feature Normalization 적용 (학습 시와 동일한 Scaler 사용)
+        if self.scaler is not None:
+            features_scaled = self.scaler.transform(features)
+        else:
+            # Scaler 없으면 원본 사용 (하위 호환)
+            features_scaled = features
+        
+        # 🆕 PCA Dimensionality Reduction 적용
+        if self.pca is not None:
+            features_final = self.pca.transform(features_scaled)
+        else:
+            features_final = features_scaled
+        
         # 예측
-        prediction = self.model.predict(features)[0]
-        probabilities = self.model.predict_proba(features)[0]
-        confidence = probabilities[1]  # 상승 확률
+        prediction = self.model.predict(features_final)[0]
+        probabilities = self.model.predict_proba(features_final)[0]
+        
+        # 🆕 Class 2 (좋은 수익) 확률을 confidence로 사용
+        # probabilities: [P(loss), P(neutral), P(profit)]
+        confidence = probabilities[2] if len(probabilities) == 3 else probabilities[1]
         
         return int(prediction), float(confidence)
     
@@ -360,6 +566,8 @@ class ModelLearner:
         if self.model is not None:
             joblib.dump({
                 "model": self.model,
+                "scaler": self.scaler,  # 🆕 Scaler도 함께 저장
+                "pca": self.pca,        # 🆕 PCA 저장
                 "metrics": self.metrics
             }, self.model_path)
             logger.info(f"💾 Model saved to {self.model_path}")
@@ -369,9 +577,13 @@ class ModelLearner:
         if Path(self.model_path).exists():
             data = joblib.load(self.model_path)
             self.model = data["model"]
+            self.scaler = data.get("scaler", None)  # 🆕 Scaler 로드 (하위 호환)
+            self.pca = data.get("pca", None)        # 🆕 PCA 로드 (하위 호환)
             self.metrics = data["metrics"]
             logger.info(f"📂 Model loaded from {self.model_path}")
             logger.info(f"   Accuracy: {self.metrics['accuracy']:.2%}")
+            if self.scaler:
+                logger.info("   ✅ Scaler loaded (Feature Normalization enabled)")
         else:
             logger.info("ℹ️  No existing model found. Will train from scratch.")
 
@@ -386,14 +598,16 @@ class FeatureEngineer:
     @staticmethod
     def extract_features(df: pd.DataFrame) -> Dict:
         """
-        OHLCV 데이터로부터 기술적 지표 추출
+        OHLCV 데이터로부터 기술적 지표 추출 (확장 버전)
         
         Args:
             df: OHLCV 컬럼을 가진 DataFrame (close, high, low, volume)
         
         Returns:
-            features: 추출된 특징 딕셔너리
+            features: 추출된 특징 딕셔너리 (16개 특징)
         """
+        from datetime import datetime
+        
         # 최소 데이터 검증
         if len(df) < 30:
             logger.warning("⚠️ Insufficient data for feature extraction")
@@ -405,7 +619,8 @@ class FeatureEngineer:
         volume = df['volume']
         
         # 1. RSI (Relative Strength Index)
-        rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
+        rsi_series = RSIIndicator(close, window=14).rsi()
+        rsi = rsi_series.iloc[-1]
         
         # 2. MACD
         macd_indicator = MACD(close)
@@ -414,11 +629,13 @@ class FeatureEngineer:
         
         # 3. Bollinger Bands
         bb = BollingerBands(close, window=20, window_dev=2)
-        bb_high = bb.bollinger_hband().iloc[-1]
-        bb_low = bb.bollinger_lband().iloc[-1]
+        bb_high = bb.bollinger_hband()
+        bb_low = bb.bollinger_lband()
         current_price = close.iloc[-1]
         # BB 내 상대 위치 (0: 하단, 0.5: 중간, 1: 상단)
-        bb_position = (current_price - bb_low) / (bb_high - bb_low) if bb_high != bb_low else 0.5
+        bb_h = bb_high.iloc[-1]
+        bb_l = bb_low.iloc[-1]
+        bb_position = (current_price - bb_l) / (bb_h - bb_l) if bb_h != bb_l else 0.5
         
         # 4. Volume Ratio
         volume_ma = volume.rolling(window=20).mean().iloc[-1]
@@ -435,7 +652,38 @@ class FeatureEngineer:
         # 7. ATR (Average True Range) - 변동성 측정
         atr = AverageTrueRange(high, low, close, window=14).average_true_range().iloc[-1]
         
+        # ============ 🆕 NEW FEATURES ============
+        
+        # 8. Time Features (시간 특징)
+        now = datetime.now()
+        hour_of_day = now.hour        # 0-23
+        day_of_week = now.weekday()   # 0-6 (월-일)
+        
+        # 9. Momentum Features (모멘텀 특징)
+        # RSI 변화량 (5분 전 대비)
+        rsi_prev_5m = rsi_series.iloc[-5] if len(rsi_series) >= 5 else rsi
+        rsi_change = rsi - rsi_prev_5m
+        
+        # 거래량 추세 (최근 5개 vs 이전 5개)
+        if len(volume) >= 10:
+            recent_vol = volume.iloc[-5:].mean()
+            prev_vol = volume.iloc[-10:-5].mean()
+            volume_trend = (recent_vol - prev_vol) / prev_vol if prev_vol > 0 else 0
+        else:
+            volume_trend = 0
+        
+        # 10. Sequence Features (시계열 특징)
+        # 5분 전 BB 위치
+        if len(bb_high) >= 5 and len(bb_low) >= 5:
+            bb_h_5m = bb_high.iloc[-5]
+            bb_l_5m = bb_low.iloc[-5]
+            price_5m = close.iloc[-5]
+            bb_position_prev_5m = (price_5m - bb_l_5m) / (bb_h_5m - bb_l_5m) if bb_h_5m != bb_l_5m else 0.5
+        else:
+            bb_position_prev_5m = bb_position
+        
         features = {
+            # 기존 특징 (10개)
             'rsi': rsi,
             'macd': macd,
             'macd_signal': macd_signal,
@@ -445,7 +693,16 @@ class FeatureEngineer:
             'price_change_15m': price_change_15m,
             'ema_9': ema_9,
             'ema_21': ema_21,
-            'atr': atr
+            'atr': atr,
+            # 🆕 시간 특징 (2개)
+            'hour_of_day': hour_of_day,
+            'day_of_week': day_of_week,
+            # 🆕 모멘텀 특징 (2개)
+            'rsi_change': rsi_change,
+            'volume_trend': volume_trend,
+            # 🆕 시계열 특징 (2개)
+            'rsi_prev_5m': rsi_prev_5m,
+            'bb_position_prev_5m': bb_position_prev_5m
         }
         
         return features

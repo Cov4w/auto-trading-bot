@@ -273,7 +273,7 @@ def render_control_panel():
     
     new_stop = st.sidebar.number_input(
         "손절 제한 (Stop Loss %)",
-        min_value=0.5,
+        min_value=0.3,  # 🔧 0.5 → 0.3 (더 타이트한 손절 허용)
         max_value=50.0,
         value=float(bot.stop_loss * 100),
         step=0.1,

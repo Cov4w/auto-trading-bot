@@ -45,8 +45,13 @@ class CoinSelector:
         # 🔥 전체 상장 코인 동적 로드
         self.candidate_coins = self._get_all_tickers()
         
+        # 🔄 순차 검사를 위한 인덱스 (Pagination)
+        self.scan_index = 0
+        self.batch_size = 50  # 한 번에 검사할 코인 수
+        
         logger.info("✅ CoinSelector initialized")
         logger.info(f"📊 Total coins available: {len(self.candidate_coins)}")
+        logger.info(f"⚡ Scan Batch Size: {self.batch_size} (Full Scan in ~{len(self.candidate_coins)//self.batch_size * 3} mins)")
     
     def _get_all_tickers(self) -> List[str]:
         """
@@ -71,14 +76,9 @@ class CoinSelector:
             if "BTC" in all_tickers:
                 krw_tickers.insert(0, "BTC")
             
+            # 🔥 전체 리스트 반환 (나중에 나눠서 검사)
             logger.info(f"✅ Loaded {len(krw_tickers)} coins from {self.exchange.exchange_name}")
-            
-            # 🔥 API 호출 제한 방지를 위해 상위 50개만 분석 (균형잡힌 설정)
-            # Upbit는 티커가 많아 전체 조회 시 Rate Limit 걸림.
-            limited_tickers = krw_tickers[:50]
-            logger.info(f"⚡ Analyzing Top {len(limited_tickers)} coins for optimal opportunity detection")
-            
-            return limited_tickers
+            return krw_tickers
         
         except Exception as e:
             logger.error(f"❌ Error fetching tickers: {e}")
@@ -140,6 +140,12 @@ class CoinSelector:
             
             # 6. 현재 가격
             current_price = self.exchange.get_current_price(ticker)
+            
+            # 🛡️ 최소 가격 필터 (저가 코인 제외)
+            MIN_PRICE = 100  # 100원 미만 코인 제외
+            if current_price and current_price < MIN_PRICE:
+                logger.debug(f"⚠️ {ticker}: Price too low ({current_price} KRW < {MIN_PRICE}), skipping")
+                return None
             
             return {
                 "ticker": ticker,
@@ -276,31 +282,47 @@ class CoinSelector:
     
     def get_top_recommendations(self, top_n: int = 5) -> List[Dict]:
         """
-        상위 N개 추천 코인 반환
-        
-        Args:
-            top_n: 추천할 코인 개수 (기본 5개)
-        
-        Returns:
-            recommendations: 점수 순으로 정렬된 추천 코인 리스트
+        상위 N개 추천 코인 반환 (순차적 배치 스캔)
         """
-        logger.info(f"🔍 Analyzing {len(self.candidate_coins)} coins...")
+        total_coins = len(self.candidate_coins)
+        if total_coins == 0:
+            return []
+            
+        # 🔄 현재 배치 범위 계산
+        start_idx = self.scan_index
+        end_idx = min(start_idx + self.batch_size, total_coins)
         
-        # 모델이 없으면 경고 (하지만 기술적 분석은 계속 진행)
+        # 검사 대상 슬라이싱
+        target_tickers = self.candidate_coins[start_idx:end_idx]
+        
+        logger.info(
+            f"🔍 Scanning Batch: {start_idx+1}~{end_idx} / {total_coins} coins "
+            f"({len(target_tickers)} items)"
+        )
+        
+        # 모델이 없으면 경고
         if self.learner.model is None:
             logger.warning("⚠️ Model not trained yet. Using technical analysis only.")
         
-        # 모든 코인 분석
+        # 배치 내 코인 분석
         analyses = []
         analyzed_count = 0
-        for ticker in self.candidate_coins:
+        for ticker in target_tickers:
             analysis = self.analyze_coin(ticker)
-            time.sleep(0.1) # 💤 API Rate Limit 방지 (0.1초 대기)
+            time.sleep(0.15) # 💤 API Rate Limit 방지 (0.15초 대기)
             if analysis:
                 analyses.append(analysis)
                 analyzed_count += 1
         
-        logger.info(f"📊 Successfully analyzed {analyzed_count}/{len(self.candidate_coins)} coins")
+        logger.info(f"📊 Successfully analyzed {analyzed_count}/{len(target_tickers)} coins (Batch)")
+        
+        # 🔄 다음 배치를 위해 인덱스 업데이트
+        self.scan_index += self.batch_size
+        if self.scan_index >= total_coins:
+            self.scan_index = 0
+            logger.info("🔄 Completed full market scan. Resetting to start.")
+        else:
+            logger.info(f"🔜 Next Scan: {self.scan_index+1}~{min(self.scan_index+self.batch_size, total_coins)}")
         
         if not analyses:
             logger.warning("⚠️ No valid coin analysis results")

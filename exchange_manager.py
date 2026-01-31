@@ -94,7 +94,7 @@ class ExchangeManager:
             return price
             
         except Exception as e:
-            logger.error(f"❌ Price Error ({self.exchange_name}): {e}")
+            logger.debug(f"⚠️ Price Error ({self.exchange_name}): {e}")
             return None
     
     def get_orderbook_bid_price(self, ticker: str) -> Optional[float]:
@@ -234,12 +234,12 @@ class ExchangeManager:
     def get_tickers(self) -> list:
         try:
             if self.exchange_name == 'bithumb':
-                 # Filter only KRW market if necessary, pybithumb.get_tickers() returns all?
-                 # Assuming pybithumb.get_tickers() returns valid tickers.
-                 return pybithumb.get_tickers()
+                 # 🔥 빗썸: KRW 마켓만 명시적으로 요청
+                 return pybithumb.get_tickers(payment_currency="KRW")
             elif self.exchange_name == 'upbit':
+                # 🔥 업비트: KRW 마켓만 이중 필터링
                 tickers = pyupbit.get_tickers(fiat="KRW")
-                return [t.replace('KRW-', '') for t in tickers]
+                return [t.replace('KRW-', '') for t in tickers if t.startswith('KRW-')]
         except Exception as e:
             logger.error(f"❌ Failed to get tickers: {e}")
             return []
