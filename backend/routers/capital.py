@@ -111,14 +111,43 @@ async def get_transactions(
     limit: int = 100,
     current_user: User = Depends(get_current_user)
 ):
-    """전체 입출금 내역 조회"""
+    """전체 입출금 내역 조회 (업비트 API)"""
     try:
         bot = get_bot()
-        transactions = bot.capital.get_all_transactions(limit)
+
+        # 업비트 API에서 입출금 내역 가져오기
+        deposits_raw = bot.exchange.get_krw_deposits(limit)
+        withdrawals_raw = bot.exchange.get_krw_withdrawals(limit)
+
+        # 포맷 변환
+        transactions = []
+
+        for d in deposits_raw:
+            transactions.append({
+                "type": "deposit",
+                "amount": float(d.get('amount', 0)),
+                "timestamp": d.get('created_at', ''),
+                "state": d.get('state', ''),
+                "txid": d.get('txid', ''),
+                "note": "업비트 원화 입금"
+            })
+
+        for w in withdrawals_raw:
+            transactions.append({
+                "type": "withdrawal",
+                "amount": float(w.get('amount', 0)),
+                "timestamp": w.get('created_at', ''),
+                "state": w.get('state', ''),
+                "txid": w.get('txid', ''),
+                "note": "업비트 원화 출금"
+            })
+
+        # 시간순 정렬 (최신순)
+        transactions.sort(key=lambda x: x['timestamp'], reverse=True)
 
         return {
             "success": True,
-            "data": transactions
+            "data": transactions[:limit]
         }
     except Exception as e:
         logger.error(f"Failed to get transactions: {e}")

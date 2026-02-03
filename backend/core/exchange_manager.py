@@ -274,5 +274,116 @@ class ExchangeManager:
                 
         except Exception as e:
             logger.error(f"❌ Failed to get holdings: {e}")
-            
+
         return holdings
+
+    def get_krw_deposits(self, limit: int = 100) -> list:
+        """
+        원화(KRW) 입금 내역 조회
+        Returns:
+            [{"amount": 1000000, "created_at": "2024-01-01T00:00:00", "state": "ACCEPTED", ...}, ...]
+        """
+        deposits = []
+        try:
+            if self.exchange_name == 'upbit':
+                # Upbit API: GET /v1/deposits
+                # pyupbit doesn't have this, so we need to use requests directly
+                import requests
+                import jwt
+                import hashlib
+                import uuid
+                from urllib.parse import urlencode, unquote
+
+                query = {
+                    'currency': 'KRW',
+                    'state': 'ACCEPTED',  # 완료된 입금만
+                    'limit': limit
+                }
+
+                query_string = unquote(urlencode(query, doseq=True)).encode("utf-8")
+                m = hashlib.sha512()
+                m.update(query_string)
+                query_hash = m.hexdigest()
+
+                payload = {
+                    'access_key': self.access_key,
+                    'nonce': str(uuid.uuid4()),
+                    'query_hash': query_hash,
+                    'query_hash_alg': 'SHA512',
+                }
+
+                jwt_token = jwt.encode(payload, self.secret_key)
+                authorization = f'Bearer {jwt_token}'
+                headers = {'Authorization': authorization}
+
+                url = f'https://api.upbit.com/v1/deposits?{urlencode(query)}'
+                response = requests.get(url, headers=headers)
+
+                if response.status_code == 200:
+                    deposits = response.json()
+                    logger.info(f"✅ 입금 내역 조회: {len(deposits)}건")
+                else:
+                    logger.error(f"❌ 입금 내역 조회 실패: {response.status_code} - {response.text}")
+
+            elif self.exchange_name == 'bithumb':
+                # Bithumb API는 다른 방식으로 구현 필요
+                logger.warning("⚠️ Bithumb 입금 내역 조회는 아직 구현되지 않았습니다")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get KRW deposits: {e}")
+
+        return deposits
+
+    def get_krw_withdrawals(self, limit: int = 100) -> list:
+        """
+        원화(KRW) 출금 내역 조회
+        Returns:
+            [{"amount": 500000, "created_at": "2024-01-01T00:00:00", "state": "DONE", ...}, ...]
+        """
+        withdrawals = []
+        try:
+            if self.exchange_name == 'upbit':
+                import requests
+                import jwt
+                import hashlib
+                import uuid
+                from urllib.parse import urlencode, unquote
+
+                query = {
+                    'currency': 'KRW',
+                    'state': 'DONE',  # 완료된 출금만
+                    'limit': limit
+                }
+
+                query_string = unquote(urlencode(query, doseq=True)).encode("utf-8")
+                m = hashlib.sha512()
+                m.update(query_string)
+                query_hash = m.hexdigest()
+
+                payload = {
+                    'access_key': self.access_key,
+                    'nonce': str(uuid.uuid4()),
+                    'query_hash': query_hash,
+                    'query_hash_alg': 'SHA512',
+                }
+
+                jwt_token = jwt.encode(payload, self.secret_key)
+                authorization = f'Bearer {jwt_token}'
+                headers = {'Authorization': authorization}
+
+                url = f'https://api.upbit.com/v1/withdraws?{urlencode(query)}'
+                response = requests.get(url, headers=headers)
+
+                if response.status_code == 200:
+                    withdrawals = response.json()
+                    logger.info(f"✅ 출금 내역 조회: {len(withdrawals)}건")
+                else:
+                    logger.error(f"❌ 출금 내역 조회 실패: {response.status_code} - {response.text}")
+
+            elif self.exchange_name == 'bithumb':
+                logger.warning("⚠️ Bithumb 출금 내역 조회는 아직 구현되지 않았습니다")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get KRW withdrawals: {e}")
+
+        return withdrawals

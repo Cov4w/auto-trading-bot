@@ -1,14 +1,17 @@
 """
 Capital Manager
 ===============
-입출금 내역 관리 및 원금 계산
+업비트 API를 통한 실제 입출금 내역 조회 및 원금 계산
 """
 
 import sqlite3
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 import logging
+
+if TYPE_CHECKING:
+    from .exchange_manager import ExchangeManager
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +27,10 @@ PROJECT_ROOT = get_project_root()
 
 
 class CapitalManager:
-    """입출금 내역 관리"""
+    """업비트 API 기반 입출금 내역 관리"""
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, exchange=None, db_path: str = None):
+        self.exchange = exchange  # ExchangeManager 인스턴스
         if db_path is None:
             db_path = str(PROJECT_ROOT / "data" / "capital.db")
         self.db_path = db_path
@@ -82,25 +86,56 @@ class CapitalManager:
             return cursor.lastrowid
 
     def get_total_deposits(self) -> float:
-        """총 입금액"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT SUM(amount) FROM deposits")
-            result = cursor.fetchone()[0]
-            return result if result else 0.0
+        """총 입금액 (업비트 API에서 가져오기)"""
+        if self.exchange is None:
+            logger.warning("⚠️ Exchange not set, using DB fallback")
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT SUM(amount) FROM deposits")
+                result = cursor.fetchone()[0]
+                return result if result else 0.0
+
+        try:
+            deposits = self.exchange.get_krw_deposits(limit=1000)
+            total = sum(float(d.get('amount', 0)) for d in deposits if d.get('state') == 'ACCEPTED')
+            logger.info(f"💰 총 입금액 (API): {total:,.0f} 원 ({len(deposits)}건)")
+            return total
+        except Exception as e:
+            logger.error(f"❌ API 입금 조회 실패, DB 사용: {e}")
+            # Fallback to DB
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT SUM(amount) FROM deposits")
+                result = cursor.fetchone()[0]
+                return result if result else 0.0
 
     def get_total_withdrawals(self) -> float:
-        """총 출금액"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT SUM(amount) FROM withdrawals")
-            result = cursor.fetchone()[0]
-            return result if result else 0.0
+        """총 출금액 (업비트 API에서 가져오기)"""
+        if self.exchange is None:
+            logger.warning("⚠️ Exchange not set, using DB fallback")
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT SUM(amount) FROM withdrawals")
+                result = cursor.fetchone()[0]
+                return result if result else 0.0
+
+        try:
+            withdrawals = self.exchange.get_krw_withdrawals(limit=1000)
+            # Upbit에서는 수수료 제외한 실제 출금액
+            total = sum(float(w.get('amount', 0)) for w in withdrawals if w.get('state') == 'DONE')
+            logger.info(f"💸 총 출금액 (API): {total:,.0f} 원 ({len(withdrawals)}건)")
+            return total
+        except Exception as e:
+            logger.error(f"❌ API 출금 조회 실패, DB 사용: {e}")
+            # Fallback to DB
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT SUM(amount) FROM withdrawals")
+                result = cursor.fetchone()[0]
+                return result if result else 0.0
 
     def get_net_capital(self) -> float:
-        """순 원금 (입금 - 출금)"""
+        """순 원금 (입금 - 출금) - API 기반"""
         deposits = self.get_total_deposits()
         withdrawals = self.get_total_withdrawals()
         net = deposits - withdrawals
-        logger.info(f"📊 순 원금: 입금 {deposits:,.0f} - 출금 {withdrawals:,.0f} = {net:,.0f} 원")
+        logger.info(f"📊 순 원금 (API): 입금 {deposits:,.0f} - 출금 {withdrawals:,.0f} = {net:,.0f} 원")
         return net
 
     def get_deposit_history(self, limit: int = 100) -> List[Dict]:

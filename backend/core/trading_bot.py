@@ -104,8 +104,8 @@ class TradingBot:
         self.memory = TradeMemory()
         self.learner = ModelLearner()
 
-        # 💰 Capital Manager (입출금 추적)
-        self.capital = CapitalManager()
+        # 💰 Capital Manager (업비트 API 기반 입출금 추적)
+        self.capital = CapitalManager(exchange=self.exchange)
 
         # 🔥 AI Coin Selector
         self.coin_selector = CoinSelector(self.learner, self.memory, self.exchange)
