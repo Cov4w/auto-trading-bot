@@ -17,6 +17,52 @@
 
 ---
 
+## ⚡ 빠른 시작 (Quick Start)
+
+### Windows 사용자
+```bash
+# 1. Repository 클론
+git clone https://github.com/Cov4w/auto-trading-bot.git
+cd auto-trading-bot
+
+# 2. 자동 설치 (Python, Node.js 필요)
+setup.bat
+
+# 3. API 키 설정
+# backend\.env 파일에서 UPBIT_ACCESS_KEY와 UPBIT_SECRET_KEY 입력
+
+# 4. 실행
+start_dev.bat
+
+# 5. 브라우저에서 http://localhost:5173 접속 후 로그인
+```
+
+### macOS/Linux 사용자
+```bash
+# 1. Repository 클론
+git clone https://github.com/Cov4w/auto-trading-bot.git
+cd auto-trading-bot
+
+# 2. 실행 권한 부여
+chmod +x setup.sh start_dev.sh
+
+# 3. 자동 설치 (Python3, Node.js 필요)
+./setup.sh
+
+# 4. API 키 설정
+nano backend/.env
+# UPBIT_ACCESS_KEY와 UPBIT_SECRET_KEY 입력 후 저장
+
+# 5. 실행
+./start_dev.sh
+
+# 6. 브라우저에서 http://localhost:5173 접속 후 로그인
+```
+
+**필수 요구사항**: Python 3.10+, Node.js 16+, Upbit API 키
+
+---
+
 ## 🌟 핵심 특징
 
 ### 1. 🧠 Continuous Learning (지속 학습)
@@ -122,8 +168,8 @@
 
 #### 1. Repository 클론
 ```bash
-git clone https://github.com/your-username/bitThumb_std.git
-cd bitThumb_std
+git clone https://github.com/Cov4w/auto-trading-bot.git
+cd auto-trading-bot
 ```
 
 #### 2. 자동 설치
@@ -161,8 +207,8 @@ start_dev.bat
 
 #### 1. Repository 클론
 ```bash
-git clone https://github.com/your-username/bitThumb_std.git
-cd bitThumb_std
+git clone https://github.com/Cov4w/auto-trading-bot.git
+cd auto-trading-bot
 ```
 
 #### 2. 실행 권한 부여
@@ -542,7 +588,7 @@ MIT License - 자유롭게 사용, 수정, 배포 가능
 
 ### Issues
 프로젝트에 대한 질문이나 버그 리포트:
-- GitHub Issues: https://github.com/your-username/bitThumb_std/issues
+- GitHub Issues: https://github.com/Cov4w/auto-trading-bot/issues
 
 ### Pull Requests
 기여는 언제나 환영합니다!
