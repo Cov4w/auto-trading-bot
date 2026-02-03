@@ -9,10 +9,13 @@ Streamlit 기반 앱에서 **FastAPI (Backend) + React (Frontend)** 아키텍처
 - **Frontend**: Streamlit UI → React + Vite + TypeScript
 - **통신**: REST API + WebSocket
 - **배포**: Docker Compose 지원
+- **호환성**: Windows / Mac / Linux 지원
 
 ---
 
 ## 📦 설치 및 실행
+
+> **🪟 Windows 사용자**는 [Windows 설치 가이드 (README-WINDOWS.md)](./README-WINDOWS.md)를 참고하세요.
 
 ### 1. 의존성 설치
 
