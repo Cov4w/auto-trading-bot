@@ -131,6 +131,7 @@ class TradingBot:
 
         # 📉 Ticker Absence Tracking (유예 기간 관리)
         self.ticker_absence_count: Dict[str, int] = {}  # {ticker: consecutive_absence_count}
+        self.ticker_origin_range: Dict[str, Tuple[int, int]] = {}  # {ticker: (start, end) where it was added}
         self.last_scanned_range: Tuple[int, int] = (0, 0)  # (start_idx, end_idx) of last scan
         self._tickers_lock = threading.Lock()
         self._recommendations_lock = threading.Lock()
@@ -1249,9 +1250,9 @@ class TradingBot:
         동적 티커 관리: Top 5 기반 자동 추가/제거 (유예 기간 적용)
 
         로직:
-        1. Top 5에 진입 → 즉시 추가 (부재 카운트 리셋)
-        2. 같은 스캔 범위에서 Top 5 이탈 → 부재 카운트 +1
-        3. 같은 범위에서 2회 연속 이탈 → 자동 제거 (단, 포지션 있으면 유지)
+        1. Top 5에 진입 → 즉시 추가 & 출처 범위 기록
+        2. 해당 티커의 출처 범위가 다시 스캔될 때만 부재 여부 체크
+        3. 출처 범위에서 2회 연속 이탈 → 자동 제거 (단, 포지션 있으면 유지)
 
         Args:
             top_5_recommendations: get_top_recommendations() 결과
@@ -1266,59 +1267,57 @@ class TradingBot:
                 self.coin_selector.scan_index
             )
 
-            # 스캔 범위가 바뀌었는지 확인
-            scan_range_changed = (current_scan_range != self.last_scanned_range)
-
-            if scan_range_changed:
-                logger.info(f"🔄 New Scan Range: {current_scan_range[0]}-{current_scan_range[1]} (was {self.last_scanned_range[0]}-{self.last_scanned_range[1]})")
-                self.last_scanned_range = current_scan_range
-                # 새 범위 스캔 시작 → 모든 부재 카운트 리셋
-                self.ticker_absence_count.clear()
-                logger.debug("   ℹ️ Absence counters reset for new scan range")
-
             top_5_tickers = {rec['ticker'] for rec in top_5_recommendations}
 
-            logger.info("🔄 Dynamic Ticker Management (Grace Period: 2 same-range cycles)")
+            logger.info(f"🔄 Dynamic Ticker Management - Scan Range: {current_scan_range[0]}-{current_scan_range[1]}")
 
-            # 1️⃣ Top 5 진입 → 자동 추가 & 부재 카운트 리셋
+            # 1️⃣ Top 5 진입 → 자동 추가 & 출처 범위 기록
             for rec in top_5_recommendations:
                 ticker = rec['ticker']
-
-                # 부재 카운트 리셋
-                if ticker in self.ticker_absence_count:
-                    del self.ticker_absence_count[ticker]
 
                 # 티커 리스트에 추가 (중복 체크)
                 if ticker not in self.tickers:
                     self.tickers.append(ticker)
-                    logger.info(f"   ✅ [{ticker}] Added to watch list (Top 5 in range {current_scan_range[0]}-{current_scan_range[1]})")
+                    self.ticker_origin_range[ticker] = current_scan_range  # 📍 출처 범위 기록
+                    logger.info(f"   ✅ [{ticker}] Added to watch list (from range {current_scan_range[0]}-{current_scan_range[1]})")
 
-            # 2️⃣ 기존 티커 중 현재 범위의 Top 5에서 빠진 것 체크
-            # (단, 스캔 범위가 같을 때만 카운트 증가)
+                # 부재 카운트 리셋 (Top 5에 재진입한 경우)
+                if ticker in self.ticker_absence_count:
+                    del self.ticker_absence_count[ticker]
+                    logger.debug(f"   🔄 [{ticker}] Absence counter reset (re-entered Top 5)")
+
+            # 2️⃣ 기존 티커 중 '출처 범위가 현재 스캔 범위와 일치'하는 것만 체크
             tickers_to_remove = []
 
             for ticker in self.tickers[:]:  # 복사본으로 순회
-                if ticker not in top_5_tickers:
-                    # 현재 스캔 범위의 Top 5에 없음
-                    # → 부재 카운트 증가 (같은 범위를 다시 스캔할 때만 의미 있음)
-                    self.ticker_absence_count[ticker] = self.ticker_absence_count.get(ticker, 0) + 1
-                    absence_count = self.ticker_absence_count[ticker]
+                ticker_origin = self.ticker_origin_range.get(ticker)
 
-                    logger.info(f"   ⚠️ [{ticker}] Not in Top 5 of range {current_scan_range[0]}-{current_scan_range[1]} (Absence: {absence_count}/2)")
+                # 📌 핵심: 이 티커의 출처 범위가 현재 스캔 범위와 같을 때만 체크
+                if ticker_origin == current_scan_range:
+                    if ticker not in top_5_tickers:
+                        # 출처 범위의 Top 5에서 빠짐 → 부재 카운트 증가
+                        self.ticker_absence_count[ticker] = self.ticker_absence_count.get(ticker, 0) + 1
+                        absence_count = self.ticker_absence_count[ticker]
 
-                    # 2회 연속 이탈 → 제거 후보
-                    if absence_count >= 2:
-                        # 포지션 체크: 보유 중이면 제거 안 함
-                        if ticker in self.positions:
-                            logger.info(f"   🔒 [{ticker}] Has active position - keeping in watch list")
-                        else:
-                            tickers_to_remove.append(ticker)
+                        logger.info(f"   ⚠️ [{ticker}] Not in Top 5 of origin range {ticker_origin[0]}-{ticker_origin[1]} (Absence: {absence_count}/2)")
+
+                        # 2회 연속 이탈 → 제거 후보
+                        if absence_count >= 2:
+                            # 포지션 체크: 보유 중이면 제거 안 함
+                            if ticker in self.positions:
+                                logger.info(f"   🔒 [{ticker}] Has active position - keeping in watch list")
+                            else:
+                                tickers_to_remove.append(ticker)
+                else:
+                    # 다른 범위 출신 티커는 체크하지 않음
+                    logger.debug(f"   ℹ️ [{ticker}] Skip check (origin: {ticker_origin}, current: {current_scan_range})")
 
             # 3️⃣ 제거 실행
             for ticker in tickers_to_remove:
                 self.tickers.remove(ticker)
                 del self.ticker_absence_count[ticker]
-                logger.info(f"   ❌ [{ticker}] Removed from watch list (2 consecutive absences in same range)")
+                del self.ticker_origin_range[ticker]  # 출처 범위도 삭제
+                logger.info(f"   ❌ [{ticker}] Removed from watch list (2 consecutive absences in origin range)")
 
             # 결과 요약
             logger.info(f"📊 Watch List Status: {len(self.tickers)} tickers {self.tickers}")
