@@ -1297,7 +1297,7 @@ class TradingBot:
 
     def _auto_recommendation_timer(self):
         """
-        🕐 1분마다 추천 업데이트 + 1위 종목 자동 추가
+        🕐 30초마다 추천 업데이트 + Top 5 기반 동적 티커 관리
         """
         logger.info("🔄 Auto recommendation timer loop started")
         
@@ -1308,37 +1308,10 @@ class TradingBot:
                 # 추천 업데이트
                 recs = self.coin_selector.get_top_recommendations(top_n=5)
                 self.recommended_coins = recs
-                
-                # 🏆 상위 코인 중 첫 번째 미보유 종목 자동 추가
+
+                # 🆕 동적 티커 관리 (유예 기간 적용)
                 if recs:
-                    added = False
-                    for i, rec in enumerate(recs, 1):
-                        ticker = rec['ticker']
-                        score = rec['score']
-                        conf = rec['confidence']
-                        
-                        # 이미 보유 중이거나 쿨다운 중이면 스킵
-                        if ticker in self.tickers:
-                            logger.debug(f"   {i}위 {ticker}: Already in tickers")
-                            continue
-                        
-                        if ticker in self.positions:
-                            logger.debug(f"   {i}위 {ticker}: Already holding position")
-                            continue
-                        
-                        if ticker in self.sold_coins_cooldown:
-                            logger.debug(f"   {i}위 {ticker}: In cooldown")
-                            continue
-                        
-                        # 첫 번째 사용 가능한 코인 발견!
-                        logger.info(f"🏆 Rank #{i} Recommendation: {ticker} (Score={score:.1f}, Confidence={conf:.1%})")
-                        self.tickers.append(ticker)
-                        logger.info(f"➕ Auto-added coin: {ticker}")
-                        added = True
-                        break
-                    
-                    if not added:
-                        logger.info("📊 All top 5 coins are already owned or in cooldown. No new additions.")
+                    self._manage_tickers_dynamically(recs)
                 
                 # 대기 (1초 단위로 체크하여 빠른 종료 지원)
                 for _ in range(self.auto_recommendation_interval):
