@@ -78,11 +78,12 @@ nano backend/.env
 - **Volume Filter**: 24시간 거래량 1억원 이상 코인만 거래
 - **BTC Correlation**: BTC 3% 이상 하락 시 알트코인 진입 차단
 
-### 3. 🎯 AI Coin Selection
-- Upbit 상장 **전체 코인 실시간 분석**
-- AI 확신도, 기술적 지표, 과거 승률 종합 평가
-- **승률이 가장 높을 코인**을 자동 선택하여 매매
-- 상위 5개 추천 코인 대시보드 표시
+### 3. 🎯 Dynamic Ticker Management (동적 감시 대상 관리)
+- **배치 스캔**: 237개 코인을 50개씩 순차 스캔 (30초 주기)
+- **누적 방식**: 각 배치의 Top 5를 감시 대상에 추가 (최대 20-25개 동시 감시)
+- **즉시 제거**: 출처 범위 재스캔 시 Top 5 이탈 시 자동 제거
+- **포지션 보호**: 활성 포지션 보유 중인 코인은 제거하지 않음
+- **실시간 분석**: 10초마다 모든 감시 대상 분석하여 자동 매매
 
 ### 4. 📊 Modern Dashboard (FastAPI + React)
 - **JWT Authentication**: 안전한 사용자 인증 시스템
@@ -98,13 +99,26 @@ nano backend/.env
 - **Flash Crash Detection**: 1분 내 7% 급락 시 긴급 청산
 - **Cooldown System**: 손절 후 1시간 재진입 금지
 
-### 6. 💾 Persistence & Scalability
-- **SQLite**: 매매 기록 및 사용자 데이터 영구 저장
+### 6. 📈 Backtesting System
+- **멀티 코인 백테스팅**: 거래 내역 상위 10개 코인 자동 선택
+- **200일 검증**: 장기간 전략 성과 측정
+- **핵심 지표**: 승률, 총 수익률, MDD, Sharpe Ratio, 손익비
+- **실전 전 검증**: 백테스팅 통과 후 실전 투입 권장
+- **간편 실행**: `python run_backtest.py` 한 줄로 실행
+
+### 7. 💰 Smart Capital Management
+- **자동 원금 동기화**: 5분마다 입출금 감지 및 원금 업데이트
+- **API 호출 최적화**: 거래 시에만 잔고 캐시 갱신
+- **정확한 수익률**: 실제 원금 기준 수익률 계산
+- **DB 영구 저장**: 자본 변화 이력 추적
+
+### 8. 💾 Persistence & Scalability
+- **SQLite**: 매매 기록, 사용자 데이터, 자본 이력 영구 저장
 - **Model Versioning**: 학습된 모델 자동 저장/로드
 - **RESTful API**: 확장 가능한 마이크로서비스 아키텍처
-- **Docker Support** (예정): 컨테이너 기반 배포
+- **Thread-Safe**: 멀티스레드 환경에서 안전한 데이터 관리
 
-### 7. 🌍 Cross-Platform Support
+### 9. 🌍 Cross-Platform Support
 - **Windows**: `.bat` 스크립트로 원클릭 설치
 - **macOS/Linux**: `.sh` 스크립트로 원클릭 설치
 - **Conda/Venv**: 둘 다 지원 (자동 감지)
@@ -385,23 +399,24 @@ XGBoost 재학습 (최신 데이터 우선)
 ### Trading Parameters (`backend/.env`)
 
 ```env
-# Position Sizing
-KELLY_FRACTION=0.5           # Kelly Criterion (0.25~1.0)
-MAX_POSITION_SIZE=0.3        # 최대 포지션 크기 (총 자산의 30%)
+# Exchange Selection
+EXCHANGE=upbit                    # 거래소 선택 (upbit 또는 bithumb)
 
-# Entry Filters
-MIN_VOLUME_24H=100000000     # 최소 거래량 (1억원)
-BTC_CORRELATION_THRESHOLD=-0.03  # BTC 하락 임계값 (-3%)
+# API Credentials
+UPBIT_ACCESS_KEY=your_key_here
+UPBIT_SECRET_KEY=your_secret_here
 
-# Exit Strategy
-TARGET_PROFIT=0.03           # 목표 수익률 (3%)
-STOP_LOSS=0.02              # 손절률 (2%)
-TRAILING_STOP=0.015         # 트레일링 스톱 (1.5%)
+# Trading Configuration
+USE_AI_COIN_SELECTION=true       # AI 코인 선택 활성화
+TICKER=BTC                       # 기본 티커 (폴백용)
+TRADE_AMOUNT=7000               # 매수 금액 (권장: 7,000원)
+TARGET_PROFIT=0.01              # 목표 수익 1%
+STOP_LOSS=0.004                 # 손절 0.4%
+REBUY_THRESHOLD=0.01            # 재매수 하락폭 1%
 
-# Risk Management
-MDD_THRESHOLD=0.05          # MDD 임계값 (5%)
-MDD_CHECK_INTERVAL=30       # MDD 체크 주기 (30초)
-COOLDOWN_PERIOD=3600        # 손절 후 대기 시간 (1시간)
+# Learning Configuration
+RETRAIN_THRESHOLD=30            # 30건마다 재학습
+MODEL_CONFIDENCE_THRESHOLD=0.65  # 확신도 65% 이상
 ```
 
 ### Model Hyperparameters (`core/data_manager.py`)
@@ -456,7 +471,36 @@ order = self.exchange.sell_market_order(ticker, amount)
 
 ---
 
-## 🧪 테스트
+## 🧪 테스트 & 백테스팅
+
+### 백테스팅 (실전 전 필수!)
+```bash
+# 200일 멀티 코인 백테스팅
+python run_backtest.py
+```
+
+**출력 예시:**
+```
+📊 테스트한 코인: BTC, ETH, XRP, ADA, SOL, ...
+총 거래 수: 136건
+승률: 52.21%
+총 수익률: +8.34%
+최종 자본: 1,083,400원
+최대 낙폭(MDD): -12.45%
+Sharpe Ratio: 1.23
+
+✅ 전략 검증 성공! 실전 투입 가능 수준입니다.
+```
+
+**검증 기준:**
+- 승률 ≥ 45%
+- 손익비 ≥ 1.5
+- MDD < 20%
+
+### 동적 티커 관리 테스트
+```bash
+python test_dynamic_ticker.py
+```
 
 ### Backend 테스트
 ```bash
@@ -538,14 +582,17 @@ bitThumb_std/
 | Risk Management | 92/100 | A- |
 | **Overall** | **88/100** | **A-** |
 
-### 주요 개선 사항 (v2.1.0)
-1. ✅ 시간 가중치 학습 (125 → 500 거래)
-2. ✅ 추세 필터 (EMA + 15분 변화)
-3. ✅ 거래량 검증 (1억원 이상)
-4. ✅ BTC 상관관계 관리
-5. ✅ MDD 체크 주기 단축 (60s → 30s)
-6. ✅ NaN 처리 개선 (median)
-7. ✅ JWT 인증 시스템
+### 주요 개선 사항 (v2.3.0)
+1. ✅ **동적 티커 관리**: 50개씩 스캔, Top 5 누적, 출처 범위 추적
+2. ✅ **백테스팅 시스템**: 200일 멀티 코인, Sharpe Ratio, 손익비 계산
+3. ✅ **자본 관리**: 입출금 자동 감지, 원금 동기화, API 최적화
+4. ✅ **Thread Safety**: 모든 공유 데이터 race condition 해결
+5. ✅ 시간 가중치 학습 (125 → 500 거래)
+6. ✅ 추세 필터 (EMA + 15분 변화)
+7. ✅ 거래량 검증 (1억원 이상)
+8. ✅ BTC 상관관계 관리
+9. ✅ MDD 체크 주기 단축 (60s → 30s)
+10. ✅ JWT 인증 시스템
 
 ---
 
@@ -553,11 +600,11 @@ bitThumb_std/
 
 ### High Priority
 - [ ] **Ensemble Model**: XGBoost + LightGBM + RandomForest
-- [ ] **Backtesting**: 과거 데이터로 전략 검증
+- [x] **Backtesting**: 과거 데이터로 전략 검증 ✅ (v2.3.0)
 - [ ] **Feature Importance**: 하위 10% 특징 제거
 
 ### Medium Priority
-- [ ] **Multi-Ticker**: 여러 코인 동시 운용
+- [x] **Multi-Ticker**: 여러 코인 동시 운용 ✅ (v2.3.0 - 동적 티커 관리)
 - [ ] **Telegram Bot**: 매매 알림 및 원격 제어
 - [ ] **Docker**: 컨테이너 기반 배포
 
