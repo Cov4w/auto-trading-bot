@@ -141,6 +141,62 @@ async def retrain_model(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/backtest/run", response_model=SuccessResponse)
+async def run_backtest(
+    ticker: str = None,
+    days: int = 200,
+    async_mode: bool = True,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    백테스팅 실행
+
+    Args:
+        ticker: 백테스팅할 코인 (None이면 현재 주요 코인 사용)
+        days: 테스트 기간 (일, 최대 200일)
+        async_mode: 백그라운드 실행 여부
+
+    Returns:
+        SuccessResponse: 백테스팅 시작/완료 결과
+    """
+    try:
+        bot = get_bot()
+        result = bot.run_backtest(ticker=ticker, days=min(days, 200), async_mode=async_mode)
+
+        return SuccessResponse(
+            success=True,
+            message=result.get('message', 'Backtest started'),
+            data=result
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to run backtest: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/backtest/status", response_model=SuccessResponse)
+async def get_backtest_status(current_user: User = Depends(get_current_user)):
+    """
+    백테스팅 상태 조회
+
+    Returns:
+        SuccessResponse: 백테스팅 진행 상태
+    """
+    try:
+        bot = get_bot()
+        status = bot.get_backtest_status()
+
+        return SuccessResponse(
+            success=True,
+            message="Backtest status retrieved",
+            data=status
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get backtest status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/update-recommendations", response_model=SuccessResponse)
 async def update_recommendations(current_user: User = Depends(get_current_user)):
     """

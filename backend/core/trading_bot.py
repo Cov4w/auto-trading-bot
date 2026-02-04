@@ -28,6 +28,7 @@ from .data_manager import TradeMemory, ModelLearner, FeatureEngineer
 from .coin_selector import CoinSelector
 from .exchange_manager import ExchangeManager
 from .capital_manager import CapitalManager
+from .backtester import Backtester
 
 # Load Environment Variables
 load_dotenv()
@@ -110,7 +111,10 @@ class TradingBot:
         # 🔥 AI Coin Selector
         self.coin_selector = CoinSelector(self.learner, self.memory, self.exchange)
         self.recommended_coins = []  # 추천 코인 리스트 캐시
-        
+
+        # 📊 Backtester
+        self.backtester = None  # 필요 시 생성
+
         # Trading State
         self.is_running = False
         self.positions: Dict[str, Dict] = {}  # {ticker: {position_info}}
@@ -1113,7 +1117,60 @@ class TradingBot:
         """수동 재학습 트리거 (UI에서 호출)"""
         logger.info("🔄 Manual Retraining Triggered")
         self._retrain_model()
-    
+
+    def run_backtest(self, ticker: str = None, days: int = 200, async_mode: bool = True) -> Dict:
+        """
+        백테스팅 실행
+
+        Args:
+            ticker: 백테스팅할 코인 (None이면 현재 주요 ticker 사용)
+            days: 테스트할 기간 (일)
+            async_mode: True면 백그라운드 실행, False면 동기 실행
+
+        Returns:
+            백테스팅 상태 또는 결과
+        """
+        if ticker is None:
+            ticker = self.tickers[0] if self.tickers else "BTC"
+
+        logger.info(f"🎯 Starting backtest for {ticker} ({days} days, async={async_mode})")
+
+        # 새 백테스터 인스턴스 생성
+        self.backtester = Backtester(self, ticker, days)
+
+        if async_mode:
+            # 백그라운드 실행
+            success = self.backtester.run_async()
+            if success:
+                return {
+                    'status': 'started',
+                    'message': f'백테스팅이 백그라운드에서 시작되었습니다 ({ticker}, {days}일)',
+                    'ticker': ticker,
+                    'days': days
+                }
+            else:
+                return {
+                    'status': 'failed',
+                    'message': '백테스팅이 이미 실행 중입니다'
+                }
+        else:
+            # 동기 실행
+            results = self.backtester.run()
+            return {
+                'status': 'completed',
+                'results': results
+            }
+
+    def get_backtest_status(self) -> Dict:
+        """백테스팅 상태 조회"""
+        if self.backtester is None:
+            return {
+                'status': 'idle',
+                'message': '백테스팅이 실행되지 않았습니다'
+            }
+
+        return self.backtester.get_status()
+
     def update_coin_recommendations(self):
         """코인 추천 리스트 업데이트 (Sync - Legacy or Direct Call)"""
         self.recommended_coins = self.coin_selector.get_top_recommendations(top_n=5)
