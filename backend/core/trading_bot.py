@@ -100,6 +100,10 @@ class TradingBot:
 
         # Risk Management
         self.max_position_size = float(os.getenv("MAX_POSITION_SIZE", 0.3))
+
+        # 🛡️ Volume Filter Configuration
+        self.enable_volume_filter = os.getenv("ENABLE_VOLUME_FILTER", "true").lower() == "true"
+        self.min_volume_24h = float(os.getenv("MIN_VOLUME_24H", 100_000_000))  # 기본값: 1억원
         
         # Data & Model Manager
         self.memory = TradeMemory()
@@ -167,6 +171,8 @@ class TradingBot:
         logger.info(f"   Trade Amount: {self.trade_amount:,.0f} KRW")
         logger.info(f"   Target Profit: {self.target_profit * 100}%")
         logger.info(f"   Stop Loss: {self.stop_loss * 100}%")
+        volume_filter_status = f"✅ ON (min: {self.min_volume_24h:,.0f} KRW)" if self.enable_volume_filter else "❌ OFF"
+        logger.info(f"   Volume Filter: {volume_filter_status}")
         logger.info(f"   Auto Recommendation: {'✅ ON (5min)' if self.auto_recommendation_enabled else '❌ OFF'}")
         logger.info("=" * 60)
     
@@ -519,11 +525,10 @@ class TradingBot:
                 return
 
             # 🛡️ 거래량 검증: 최소 24시간 거래량 체크 (슬리피지 방지)
-            MIN_VOLUME_24H = 100_000_000  # 1억원
-            if len(df) >= 24 and current_price:
+            if self.enable_volume_filter and len(df) >= 24 and current_price:
                 volume_24h = df['volume'].iloc[-24:].sum() * current_price
-                if volume_24h < MIN_VOLUME_24H:
-                    logger.debug(f"⚠️ [{ticker}] 24h volume too low: {volume_24h:,.0f} KRW (min: {MIN_VOLUME_24H:,.0f}), skipping")
+                if volume_24h < self.min_volume_24h:
+                    logger.debug(f"⚠️ [{ticker}] 24h volume too low: {volume_24h:,.0f} KRW (min: {self.min_volume_24h:,.0f}), skipping")
                     return
 
             # 2. 특징 추출
