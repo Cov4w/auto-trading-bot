@@ -235,6 +235,16 @@ class Backtester:
                 'total_trades': 0,
                 'win_rate': 0,
                 'total_return': 0,
+                'final_capital': self.capital,
+                'avg_profit': 0,
+                'avg_loss': 0,
+                'profit_loss_ratio': 0,
+                'max_drawdown': 0,
+                'sharpe_ratio': 0,
+                'wins': 0,
+                'losses': 0,
+                'tested_coins': self.tickers,
+                'coin_count': len(self.tickers),
                 'message': '거래 없음 (매수 신호가 발생하지 않음)'
             }
 
