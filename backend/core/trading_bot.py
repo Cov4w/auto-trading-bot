@@ -15,7 +15,7 @@ Trading Flow:
 import time
 import threading
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import logging
 import os
 from dotenv import load_dotenv
@@ -127,6 +127,9 @@ class TradingBot:
         self._balance_cache = None
         self._capital_cache = None
         self._last_deposit_check = None  # 마지막 입출금 체크 시간
+
+        # 📉 Ticker Absence Tracking (유예 기간 관리)
+        self.ticker_absence_count: Dict[str, int] = {}  # {ticker: consecutive_absence_count}
         self._tickers_lock = threading.Lock()
         self._recommendations_lock = threading.Lock()
         
@@ -1208,6 +1211,9 @@ class TradingBot:
 
             self.recommended_coins = recs
 
+            # 🆕 동적 티커 관리: Top 5 기반 자동 추가/제거 (유예 기간 적용)
+            self._manage_tickers_dynamically(recs)
+
             logger.info("=" * 60)
             logger.info(f"✅ RECOMMENDATION UPDATE COMPLETE ({elapsed:.1f}s)")
             logger.info(f"📈 Found {len(recs)} recommended coins:")
@@ -1228,7 +1234,67 @@ class TradingBot:
             logger.error(traceback.format_exc())
         finally:
             self.is_updating_recommendations = False
-    
+
+    def _manage_tickers_dynamically(self, top_5_recommendations: List[Dict]):
+        """
+        동적 티커 관리: Top 5 기반 자동 추가/제거 (유예 기간 적용)
+
+        로직:
+        1. Top 5에 진입 → 즉시 추가 (부재 카운트 리셋)
+        2. Top 5에서 이탈 → 부재 카운트 +1
+        3. 2회 연속 이탈 → 자동 제거 (단, 포지션 있으면 유지)
+
+        Args:
+            top_5_recommendations: get_top_recommendations() 결과
+        """
+        if not top_5_recommendations:
+            return
+
+        top_5_tickers = {rec['ticker'] for rec in top_5_recommendations}
+
+        logger.info("🔄 Dynamic Ticker Management (Grace Period: 2 cycles)")
+
+        # 1️⃣ Top 5 진입 → 자동 추가 & 부재 카운트 리셋
+        for rec in top_5_recommendations:
+            ticker = rec['ticker']
+
+            # 부재 카운트 리셋
+            if ticker in self.ticker_absence_count:
+                del self.ticker_absence_count[ticker]
+
+            # 티커 리스트에 추가 (중복 체크)
+            if ticker not in self.tickers:
+                self.tickers.append(ticker)
+                logger.info(f"   ✅ [{ticker}] Added to watch list (Top 5 entry)")
+
+        # 2️⃣ 기존 티커 중 Top 5에서 빠진 것 체크
+        tickers_to_remove = []
+
+        for ticker in self.tickers[:]:  # 복사본으로 순회
+            if ticker not in top_5_tickers:
+                # Top 5에 없음 → 부재 카운트 증가
+                self.ticker_absence_count[ticker] = self.ticker_absence_count.get(ticker, 0) + 1
+                absence_count = self.ticker_absence_count[ticker]
+
+                logger.info(f"   ⚠️ [{ticker}] Not in Top 5 (Absence: {absence_count}/2)")
+
+                # 2회 연속 이탈 → 제거 후보
+                if absence_count >= 2:
+                    # 포지션 체크: 보유 중이면 제거 안 함
+                    if ticker in self.positions:
+                        logger.info(f"   🔒 [{ticker}] Has active position - keeping in watch list")
+                    else:
+                        tickers_to_remove.append(ticker)
+
+        # 3️⃣ 제거 실행
+        for ticker in tickers_to_remove:
+            self.tickers.remove(ticker)
+            del self.ticker_absence_count[ticker]
+            logger.info(f"   ❌ [{ticker}] Removed from watch list (2 consecutive absences)")
+
+        # 결과 요약
+        logger.info(f"📊 Watch List Status: {len(self.tickers)} tickers {self.tickers}")
+
     def _auto_recommendation_timer(self):
         """
         🕐 1분마다 추천 업데이트 + 1위 종목 자동 추가
