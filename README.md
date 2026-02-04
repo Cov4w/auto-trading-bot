@@ -599,7 +599,7 @@ MIT License - 자유롭게 사용, 수정, 배포 가능
 5. Create a Pull Request
 
 ### Support
-- Email: your-email@example.com
+- Email: covachoi708@gmail.com
 - Discord: (추가 예정)
 
 ---
