@@ -15,7 +15,7 @@ Trading Flow:
 import time
 import threading
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import logging
 import os
 from dotenv import load_dotenv
@@ -131,6 +131,7 @@ class TradingBot:
 
         # 📉 Ticker Absence Tracking (유예 기간 관리)
         self.ticker_absence_count: Dict[str, int] = {}  # {ticker: consecutive_absence_count}
+        self.last_scanned_range: Tuple[int, int] = (0, 0)  # (start_idx, end_idx) of last scan
         self._tickers_lock = threading.Lock()
         self._recommendations_lock = threading.Lock()
         
@@ -1249,8 +1250,8 @@ class TradingBot:
 
         로직:
         1. Top 5에 진입 → 즉시 추가 (부재 카운트 리셋)
-        2. Top 5에서 이탈 → 부재 카운트 +1
-        3. 2회 연속 이탈 → 자동 제거 (단, 포지션 있으면 유지)
+        2. 같은 스캔 범위에서 Top 5 이탈 → 부재 카운트 +1
+        3. 같은 범위에서 2회 연속 이탈 → 자동 제거 (단, 포지션 있으면 유지)
 
         Args:
             top_5_recommendations: get_top_recommendations() 결과
@@ -1259,9 +1260,25 @@ class TradingBot:
             return
 
         with self._tickers_lock:  # 🔒 Thread-safe ticker list modification
+            # 현재 스캔 범위 가져오기
+            current_scan_range = (
+                self.coin_selector.scan_index - self.coin_selector.batch_size,
+                self.coin_selector.scan_index
+            )
+
+            # 스캔 범위가 바뀌었는지 확인
+            scan_range_changed = (current_scan_range != self.last_scanned_range)
+
+            if scan_range_changed:
+                logger.info(f"🔄 New Scan Range: {current_scan_range[0]}-{current_scan_range[1]} (was {self.last_scanned_range[0]}-{self.last_scanned_range[1]})")
+                self.last_scanned_range = current_scan_range
+                # 새 범위 스캔 시작 → 모든 부재 카운트 리셋
+                self.ticker_absence_count.clear()
+                logger.debug("   ℹ️ Absence counters reset for new scan range")
+
             top_5_tickers = {rec['ticker'] for rec in top_5_recommendations}
 
-            logger.info("🔄 Dynamic Ticker Management (Grace Period: 2 cycles)")
+            logger.info("🔄 Dynamic Ticker Management (Grace Period: 2 same-range cycles)")
 
             # 1️⃣ Top 5 진입 → 자동 추가 & 부재 카운트 리셋
             for rec in top_5_recommendations:
@@ -1274,18 +1291,20 @@ class TradingBot:
                 # 티커 리스트에 추가 (중복 체크)
                 if ticker not in self.tickers:
                     self.tickers.append(ticker)
-                    logger.info(f"   ✅ [{ticker}] Added to watch list (Top 5 entry)")
+                    logger.info(f"   ✅ [{ticker}] Added to watch list (Top 5 in range {current_scan_range[0]}-{current_scan_range[1]})")
 
-            # 2️⃣ 기존 티커 중 Top 5에서 빠진 것 체크
+            # 2️⃣ 기존 티커 중 현재 범위의 Top 5에서 빠진 것 체크
+            # (단, 스캔 범위가 같을 때만 카운트 증가)
             tickers_to_remove = []
 
             for ticker in self.tickers[:]:  # 복사본으로 순회
                 if ticker not in top_5_tickers:
-                    # Top 5에 없음 → 부재 카운트 증가
+                    # 현재 스캔 범위의 Top 5에 없음
+                    # → 부재 카운트 증가 (같은 범위를 다시 스캔할 때만 의미 있음)
                     self.ticker_absence_count[ticker] = self.ticker_absence_count.get(ticker, 0) + 1
                     absence_count = self.ticker_absence_count[ticker]
 
-                    logger.info(f"   ⚠️ [{ticker}] Not in Top 5 (Absence: {absence_count}/2)")
+                    logger.info(f"   ⚠️ [{ticker}] Not in Top 5 of range {current_scan_range[0]}-{current_scan_range[1]} (Absence: {absence_count}/2)")
 
                     # 2회 연속 이탈 → 제거 후보
                     if absence_count >= 2:
@@ -1299,7 +1318,7 @@ class TradingBot:
             for ticker in tickers_to_remove:
                 self.tickers.remove(ticker)
                 del self.ticker_absence_count[ticker]
-                logger.info(f"   ❌ [{ticker}] Removed from watch list (2 consecutive absences)")
+                logger.info(f"   ❌ [{ticker}] Removed from watch list (2 consecutive absences in same range)")
 
             # 결과 요약
             logger.info(f"📊 Watch List Status: {len(self.tickers)} tickers {self.tickers}")
