@@ -45,3 +45,13 @@ logs/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Development & Testing
+test_*.py
+diagnose*.py
+*_REPORT.md
+*_FIXES.md
+*_SUMMARY.md
+*_GUIDE.md
+*_UPDATE.md
+RUN.md
