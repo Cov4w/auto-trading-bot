@@ -7,6 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, useEffect } from 'react';
 import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import { useTheme } from '../contexts/ThemeContext';
 import StatusCard from '../components/StatusCard';
 import ControlPanel from '../components/ControlPanel';
 import TradeHistory from '../components/TradeHistory';
@@ -19,6 +20,7 @@ import '../styles/dashboard.css';
 export default function Dashboard() {
   const queryClient = useQueryClient();
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const [wsConnected, setWsConnected] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
 
@@ -107,15 +109,41 @@ export default function Dashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  // WebSocket 연결
+  // WebSocket 연결 (탭 전환 시에도 안정적 유지)
   useEffect(() => {
     let ws: WebSocket | null = null;
-    let pingInterval: NodeJS.Timeout | null = null;
-    let reconnectTimeout: NodeJS.Timeout | null = null;
+    let pingInterval: ReturnType<typeof setInterval> | null = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let isUnmounting = false;
+    let isTabHidden = false;
+    let reconnectAttempts = 0;
+    const maxReconnectDelay = 30000; // 최대 30초
+
+    const cleanup = () => {
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+    };
+
+    const getReconnectDelay = () => {
+      // 지수 백오프: 1초, 2초, 4초, 8초... 최대 30초
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
+      return delay;
+    };
 
     const connect = () => {
       if (isUnmounting) return;
+
+      // 기존 연결이 있으면 정리
+      if (ws && ws.readyState !== WebSocket.CLOSED) {
+        ws.close();
+      }
+      cleanup();
 
       try {
         ws = api.ws.connectLive();
@@ -123,17 +151,29 @@ export default function Dashboard() {
         ws.onopen = () => {
           console.log('WebSocket connected');
           setWsConnected(true);
+          reconnectAttempts = 0; // 연결 성공 시 재시도 횟수 리셋
+
+          // Ping 전송 (keep-alive) - 30초마다 (백그라운드 탭에서도 동작하도록)
+          pingInterval = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send('ping');
+            }
+          }, 30000);
         };
 
         ws.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data);
 
-            if (message.type === 'update') {
-              // 실시간 업데이트 반영 (throttled)
+            // heartbeat, pong은 무시 (로깅도 하지 않음)
+            if (message.type === 'heartbeat' || message.type === 'pong') {
+              return;
+            }
+
+            if (message.type === 'update' || message.type === 'status') {
               queryClient.invalidateQueries({
                 queryKey: ['botStatus'],
-                refetchType: 'none' // 자동 refetch 방지
+                refetchType: 'none'
               });
               queryClient.invalidateQueries({
                 queryKey: ['positions'],
@@ -141,48 +181,73 @@ export default function Dashboard() {
               });
             }
           } catch (e) {
-            console.error('WebSocket message parse error:', e);
+            // JSON 파싱 에러는 무시 (ping 텍스트 등)
           }
         };
 
-        ws.onclose = () => {
-          console.log('WebSocket disconnected');
+        ws.onclose = (event) => {
+          // 정상 종료(1000)나 탭 숨김 상태에서는 로깅 최소화
+          if (event.code !== 1000 && !isTabHidden) {
+            console.log(`WebSocket disconnected (code: ${event.code})`);
+          }
           setWsConnected(false);
+          cleanup();
 
-          // 재연결 시도 (5초 후, unmount되지 않은 경우만)
-          if (!isUnmounting) {
-            reconnectTimeout = setTimeout(() => {
-              console.log('Attempting to reconnect...');
-              connect();
-            }, 5000);
+          // 탭이 보이는 상태에서만 자동 재연결
+          if (!isUnmounting && !isTabHidden) {
+            reconnectAttempts++;
+            const delay = getReconnectDelay();
+            reconnectTimeout = setTimeout(connect, delay);
           }
         };
 
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          ws?.close();
+        ws.onerror = () => {
+          // 에러 로깅 최소화 (onclose에서 처리됨)
         };
-
-        // Ping 전송 (keep-alive)
-        pingInterval = setInterval(() => {
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send('ping');
-          }
-        }, 30000);
       } catch (error) {
-        console.error('WebSocket connection error:', error);
         setWsConnected(false);
+        // 연결 실패 시 재시도
+        if (!isUnmounting && !isTabHidden) {
+          reconnectAttempts++;
+          const delay = getReconnectDelay();
+          reconnectTimeout = setTimeout(connect, delay);
+        }
       }
     };
 
+    // 탭 가시성 변경 핸들러
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // 탭이 숨겨짐 - ping은 계속 유지 (브라우저가 알아서 throttle)
+        isTabHidden = true;
+        // 재연결 타이머만 정리 (ping은 유지)
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+          reconnectTimeout = null;
+        }
+      } else {
+        // 탭이 다시 보임 - 즉시 연결 상태 확인
+        isTabHidden = false;
+        reconnectAttempts = 0; // 탭 복귀 시 재시도 횟수 리셋
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          // 탭 복귀 시 즉시 재연결 시도
+          connect();
+        }
+      }
+    };
+
+    // 이벤트 리스너 등록
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // 초기 연결
     connect();
 
     return () => {
       isUnmounting = true;
-      if (pingInterval) clearInterval(pingInterval);
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      cleanup();
       if (ws) {
-        ws.close();
+        ws.close(1000, 'Component unmounting');
         ws = null;
       }
     };
@@ -202,6 +267,9 @@ export default function Dashboard() {
           <span className="user-info">
             👤 {user?.username || user?.email}
           </span>
+          <button onClick={toggleTheme} className="theme-toggle" title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
           <button onClick={logout} className="logout-button">
             Logout
           </button>

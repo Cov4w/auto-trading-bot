@@ -28,6 +28,11 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background-color: #0f0c29;
+  transition: background-color 0.3s ease;
+}
+
+[data-theme="light"] body {
+  background-color: #f8fafc;
 }
 
 h1 {

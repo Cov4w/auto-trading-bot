@@ -10,10 +10,22 @@ import logging
 import asyncio
 import json
 from datetime import datetime
+import traceback
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def safe_json_dumps(data: dict) -> str:
+    """JSON 직렬화 안전하게 수행 (nan/inf 처리)"""
+    def sanitize(obj):
+        if isinstance(obj, float):
+            if obj != obj or obj == float('inf') or obj == float('-inf'):  # nan or inf
+                return 0.0
+        return obj
+
+    return json.dumps(data, default=str)
 
 
 # 연결된 클라이언트 관리
@@ -70,24 +82,34 @@ async def websocket_live_updates(websocket: WebSocket):
     - log: 로그 메시지
     """
     await manager.connect(websocket)
+    update_interval = 10  # 10초마다 상태 업데이트
+    client_timeout = 120  # 클라이언트 메시지 타임아웃 2분 (백그라운드 탭 고려)
 
     try:
         # 초기 상태 전송
         bot = get_bot()
         if bot:
-            status = bot.get_status()
-            status = bot.get_status()
-            await websocket.send_text(json.dumps({
-                "type": "status",
-                "data": status,
-                "timestamp": datetime.now().isoformat()
-            }, default=str))
+            try:
+                status = bot.get_status()
+                await websocket.send_text(json.dumps({
+                    "type": "status",
+                    "data": status,
+                    "timestamp": datetime.now().isoformat()
+                }, default=str))
+            except Exception as e:
+                logger.warning(f"Failed to send initial status: {e}")
+
+        last_client_message = asyncio.get_event_loop().time()
 
         # 클라이언트로부터 메시지 수신 대기
         while True:
             try:
-                # 클라이언트 메시지 수신 (keep-alive)
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                # 클라이언트 메시지 수신 (keep-alive) - update_interval 타임아웃
+                data = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=float(update_interval)
+                )
+                last_client_message = asyncio.get_event_loop().time()
 
                 # ping/pong 처리
                 if data == "ping":
@@ -97,7 +119,13 @@ async def websocket_live_updates(websocket: WebSocket):
                     }, default=str))
 
             except asyncio.TimeoutError:
-                # 주기적으로 상태 업데이트 전송
+                # 클라이언트 타임아웃 체크 (백그라운드 탭이 오래 방치된 경우)
+                current_time = asyncio.get_event_loop().time()
+                if current_time - last_client_message > client_timeout:
+                    logger.info("Client inactive for too long, closing connection")
+                    break
+
+                # 주기적으로 상태 업데이트 전송 + 서버 heartbeat
                 if bot:
                     try:
                         # 봇 상태
@@ -105,10 +133,13 @@ async def websocket_live_updates(websocket: WebSocket):
 
                         # 현재 가격 정보
                         prices = {}
-                        for ticker in bot.tickers:
-                            price = bot.exchange.get_current_price(ticker)
-                            if price:
-                                prices[ticker] = price
+                        for ticker in bot.tickers[:10]:  # 최대 10개만 조회 (속도 개선)
+                            try:
+                                price = bot.exchange.get_current_price(ticker)
+                                if price:
+                                    prices[ticker] = price
+                            except Exception:
+                                pass  # 개별 가격 조회 실패는 무시
 
                         # 상태 전송
                         await websocket.send_text(json.dumps({
@@ -121,13 +152,40 @@ async def websocket_live_updates(websocket: WebSocket):
                         }, default=str))
 
                     except Exception as e:
-                        logger.error(f"Error sending update: {e}")
+                        logger.warning(f"Error preparing update: {e}")
+                        # 연결 유지를 위해 최소한 heartbeat 전송
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "heartbeat",
+                                "timestamp": datetime.now().isoformat()
+                            }))
+                        except Exception:
+                            break  # heartbeat도 실패하면 연결 종료
+                else:
+                    # 봇이 없어도 heartbeat 전송하여 연결 유지
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "heartbeat",
+                            "timestamp": datetime.now().isoformat()
+                        }))
+                    except Exception:
+                        break
 
             except WebSocketDisconnect:
+                logger.info("Client initiated disconnect")
                 break
 
+            except Exception as e:
+                # 예상치 못한 에러 - 로깅 후 계속 시도
+                logger.warning(f"WebSocket receive error: {type(e).__name__}: {e}")
+                await asyncio.sleep(1)  # 잠시 대기 후 재시도
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected normally")
+
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
 
     finally:
         manager.disconnect(websocket)

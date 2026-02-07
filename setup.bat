@@ -109,7 +109,7 @@ echo   2. Start development servers:
 echo      start_dev.bat
 echo.
 echo   3. Access the application:
-echo      Frontend: http://localhost:5173
+echo      Frontend: http://localhost:3000
 echo      API Docs: http://localhost:8000/docs
 echo.
 echo ======================================================================

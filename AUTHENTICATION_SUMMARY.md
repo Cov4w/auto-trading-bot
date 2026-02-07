@@ -57,7 +57,7 @@ npm run dev
 ```
 
 ### 5. Access Application
-Navigate to `http://localhost:5173` and login!
+Navigate to `http://localhost:3000` and login!
 
 ## New Files Created
 
@@ -143,7 +143,7 @@ CREATE TABLE users (
 ## Testing
 
 1. **Create Admin User**: `python backend/create_admin.py`
-2. **Access Application**: `http://localhost:5173`
+2. **Access Application**: `http://localhost:3000`
 3. **Register New User**: Click "Register here" on login page
 4. **Login**: Use created credentials
 5. **Access Dashboard**: Should see user info and logout button

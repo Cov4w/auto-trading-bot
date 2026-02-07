@@ -317,7 +317,7 @@ class TradeMemory:
         """현재 매매 통계 반환"""
         with sqlite3.connect(self.db_path) as conn:
             stats = conn.execute("""
-                SELECT 
+                SELECT
                     COUNT(*) as total_trades,
                     SUM(CASE WHEN is_profitable = 1 THEN 1 ELSE 0 END) as wins,
                     AVG(profit_rate) as avg_profit,
@@ -326,17 +326,20 @@ class TradeMemory:
                 FROM trades
                 WHERE status = 'closed'
             """).fetchone()
-        
+
         total, wins, avg_profit, max_profit, max_loss = stats
-        win_rate = (wins / total * 100) if total > 0 else 0
-        
-        return {
+        win_rate = (wins / total * 100) if total and total > 0 else 0
+
+        result = {
             "total_trades": total or 0,
             "win_rate": win_rate,
             "avg_profit_pct": (avg_profit or 0) * 100,
             "max_profit_pct": (max_profit or 0) * 100,
             "max_loss_pct": (max_loss or 0) * 100
         }
+
+        # JSON 직렬화를 위해 nan/inf 값 정제
+        return sanitize_dict_for_json(result)
     
     def get_open_positions(self) -> list:
         """
@@ -680,13 +683,51 @@ class ModelLearner:
             logger.info("ℹ️  No existing model found. Will train from scratch.")
 
 
+def sanitize_float(value):
+    """
+    JSON 직렬화를 위해 float 값 정제
+    nan, inf, -inf를 None 또는 0으로 변환
+    """
+    if isinstance(value, float):
+        if np.isnan(value) or np.isinf(value):
+            return 0.0
+    return value
+
+
+def sanitize_dict_for_json(data):
+    """
+    딕셔너리 내의 모든 값을 JSON-safe하게 변환
+    재귀적으로 중첩된 딕셔너리와 리스트도 처리
+    - float: nan/inf를 0.0으로 변환
+    - datetime: ISO 문자열로 변환
+    - numpy 타입: Python 기본 타입으로 변환
+    """
+    if isinstance(data, dict):
+        return {k: sanitize_dict_for_json(v) for k, v in data.items()}
+    elif isinstance(data, (list, tuple)):
+        return [sanitize_dict_for_json(item) for item in data]
+    elif isinstance(data, np.ndarray):
+        return [sanitize_dict_for_json(item) for item in data.tolist()]
+    elif isinstance(data, float):
+        return sanitize_float(data)
+    elif isinstance(data, np.floating):
+        return sanitize_float(float(data))
+    elif isinstance(data, np.integer):
+        return int(data)
+    elif isinstance(data, np.bool_):
+        return bool(data)
+    elif isinstance(data, datetime):
+        return data.isoformat()
+    return data
+
+
 class FeatureEngineer:
     """
     기술적 지표 기반 특징 추출
-    
+
     과거 데이터를 받아 Machine Learning에 사용할 특징(Features)을 생성합니다.
     """
-    
+
     @staticmethod
     def extract_features(df: pd.DataFrame) -> Dict:
         """
@@ -796,8 +837,9 @@ class FeatureEngineer:
             'rsi_prev_5m': rsi_prev_5m,
             'bb_position_prev_5m': bb_position_prev_5m
         }
-        
-        return features
+
+        # JSON 직렬화를 위해 nan/inf 값 정제
+        return sanitize_dict_for_json(features)
     
     @staticmethod
     def features_to_dataframe(features: Dict) -> pd.DataFrame:

@@ -34,7 +34,7 @@ setup.bat
 # 4. 실행
 start_dev.bat
 
-# 5. 브라우저에서 http://localhost:5173 접속 후 로그인
+# 5. 브라우저에서 http://localhost:3000 접속 후 로그인
 ```
 
 ### macOS/Linux 사용자
@@ -56,7 +56,7 @@ nano backend/.env
 # 5. 실행
 ./start_dev.sh
 
-# 6. 브라우저에서 http://localhost:5173 접속 후 로그인
+# 6. 브라우저에서 http://localhost:3000 접속 후 로그인
 ```
 
 **필수 요구사항**: Python 3.10+, Node.js 16+, Upbit API 키
@@ -213,7 +213,7 @@ start_dev.bat
 
 두 개의 창이 열립니다:
 - **Backend**: http://localhost:8000
-- **Frontend**: http://localhost:5173
+- **Frontend**: http://localhost:3000
 
 ---
 
@@ -283,7 +283,7 @@ conda activate upBit
 ## 🚀 사용 방법
 
 ### 1. 로그인
-- Frontend (http://localhost:5173) 접속
+- Frontend (http://localhost:3000) 접속
 - 설치 시 생성한 Admin 계정으로 로그인
 
 ### 2. 봇 시작

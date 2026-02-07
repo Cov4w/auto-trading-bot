@@ -110,14 +110,14 @@ cd frontend
 npm run dev
 ```
 
-The frontend will start on `http://localhost:5173` (Vite default)
+The frontend will start on `http://localhost:3000`
 
 ## Usage
 
 ### For Users
 
 1. **First Time Setup**
-   - Navigate to `http://localhost:5173`
+   - Navigate to `http://localhost:3000`
    - Click "Register here" on the login page
    - Fill in username, email, password
    - Click "Register"

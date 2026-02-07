@@ -24,7 +24,7 @@ npm install
 npm run dev
 ```
 
-Frontend 서버가 http://localhost:5173 에서 실행됩니다.
+Frontend 서버가 http://localhost:3000 에서 실행됩니다.
 
 ## 🏗️ 빌드
 

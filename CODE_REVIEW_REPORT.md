@@ -232,7 +232,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
    ```
 
 2. **API 접속 테스트**
-   - 프론트엔드: http://localhost:5173
+   - 프론트엔드: http://localhost:3000
    - API 문서: http://localhost:8000/docs
    - Health Check: http://localhost:8000/api/health
 
